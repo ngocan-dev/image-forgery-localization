@@ -2,7 +2,7 @@
 
 A pre-thesis research project using PyTorch, U-Net and CASIA v2 to predict where an image was manipulated.
 
-**Status: the RGB training and validation pipeline is implemented**, including U-Net, validated datasets, BCE + Dice loss, pixel metrics, early stopping and resumable checkpoints. Standalone audit/evaluate/predict commands remain scaffolds. No real CASIA training or research results are included; synthetic tests only verify software behavior.
+**Status: the RGB training and validation pipeline is implemented**, including U-Net, validated datasets, BCE + Dice loss, pixel metrics, early stopping and resumable checkpoints. Dataset auditing and a Kaggle setup/training workflow are available; standalone evaluate/predict commands remain scaffolds. No real CASIA training or research results are included; synthetic tests only verify software behavior.
 
 ## Research objective
 
@@ -42,7 +42,7 @@ Images have shape `(3, 256, 256)` and masks `(1, 256, 256)`. Batches add a leadi
 | `src/forgery_localization/training/` | BCE/Dice losses, epoch loops and early stopping |
 | `src/forgery_localization/evaluation/` | Pixel precision, recall, F1, Dice and IoU |
 | `src/forgery_localization/utils/` | Dataset visualization and future reproducibility helpers |
-| `scripts/` | Working train command; audit, evaluate and predict remain scaffolds |
+| `scripts/` | Working train, dataset audit and Kaggle setup commands; evaluate/predict remain scaffolds |
 | `tests/` | Synthetic dataset, visualization, import and U-Net tests; no CASIA data or GPU needed |
 | `checkpoints/` | Best and resumable model checkpoints; ignored by Git |
 | `outputs/` | Training history, synthetic checks and figures; ignored by Git |
@@ -290,6 +290,104 @@ Training tests create clearly labeled synthetic PNG images/masks in temporary di
 - Foreground disappears on resizing: review tiny manipulated regions and image-size choice; do not silently convert these samples into authentic examples.
 
 Before real CASIA training, obtain permitted images and verified masks, inspect polarity and alignment, establish source/donor groups, freeze audited splits, review class balance and sample counts, configure storage/device capacity, and run a small real-data sanity check. No actual CASIA files, mask release conventions or source relationships have been verified in this workspace. A final standalone test-evaluation/prediction command remains to be implemented before reporting thesis results.
+
+## Kaggle CASIA2 workflow
+
+**Real dataset status:** no CASIA2 files or Kaggle input mount were accessible in the development environment. The reported 7,492 Au, 5,124 Tp and 5,123 Groundtruth files are user-supplied expectations, not verified counts. A one-file count difference does not establish which mask is missing or prove all other pairs are valid. No Kaggle real-data smoke run or full training has been performed here.
+
+### 1. Attach inputs and set up the runtime
+
+Add your CASIA2 dataset to the Kaggle Notebook. Place a copy of this repository under `/kaggle/working/image-forgery-localization` (clone your own repository or copy an attached project archive there). Enable Internet for dependency installation and select a GPU accelerator for full training. Keep dataset files read-only under `/kaggle/input`; all audit exports, checkpoints and histories go under `/kaggle/working`.
+
+In a notebook cell, locate the actual dataset directory without assuming its Kaggle slug:
+
+```python
+from pathlib import Path
+roots = [p for p in Path("/kaggle/input").rglob("CASIA2")
+         if all((p / name).is_dir() for name in ("Au", "Tp", "Groundtruth"))]
+print(roots)
+assert len(roots) == 1, "Select the correct dataset directory explicitly if zero/multiple matches."
+CASIA_ROOT = roots[0]
+```
+
+Change into the project, then run setup:
+
+```python
+%cd /kaggle/working/image-forgery-localization
+!python scripts/kaggle_setup.py setup --allow-runtime-python
+```
+
+The canonical package targets Python 3.11. Kaggle runtime versions change; the [official Kaggle runtime releases](https://github.com/Kaggle/docker-python/releases) include Python 3.12 runtimes. Setup normally refuses non-3.11 Python. `--allow-runtime-python` explicitly permits testing the current runtime: it installs canonical dependencies, preserves the existing compatible GPU PyTorch, bypasses the Python metadata constraint **only for the local package with no dependency installation**, and runs the entire test suite. Success is written to `/kaggle/working/environment.json` with dependency/GPU versions. This is a tested-runtime workaround, not a change to the declared Python support range. On dependency/import/test failure, stop and use a compatible runtime; do not proceed to training. Setup does not download dataset annotations. Internet-disabled notebooks need a prepared compatible environment or attached dependency wheels.
+
+### 2. Audit candidates without approving them
+
+```python
+!python scripts/audit_dataset.py scan --root "{CASIA_ROOT}" --output /kaggle/working/casia_audit --mask-suffix _gt --preview-limit 24
+```
+
+The scanner recursively reads `Au`, `Tp` and `Groundtruth`. Pairing uses case-insensitive exact stems after optionally removing `_gt` from mask stems; image/mask extensions may differ. This is a configurable candidate rule, **not a verified CASIA naming convention**. Use `--mask-suffix ""` for identical stems, or the actual suffix observed in your release. Ambiguous pairs are never picked arbitrarily. If your release requires arbitrary filename mappings, curate a separate staging layout with reviewed same-stem names and re-audit; do not rename the Kaggle input or fabricate annotations.
+
+Audit outputs:
+
+- `audit.json`: observed counts, every image/candidate pair, file hashes and unused masks. The supplied counts are recorded separately for comparison.
+- `review.csv`: row-by-row structural issues, white-pixel fraction and blank approval fields.
+- `previews/000000.png`, etc.: RGB, original mask, white-foreground overlay and black-foreground overlay. Filenames are zero-based row indices in `audit.json`; authentic rows have no mask preview. Default 24 is a diagnostic sample, **not evidence that all pairs align**. Increase `--preview-limit` (for example 6000) in a new audit directory to render all pair candidates. Inspect original-resolution pairs when thumbnails are inconclusive.
+
+Counts and pixel statistics cannot establish polarity. Compare overlays with visible edits and trusted annotation documentation. A correct-dimension but wrong-image mask can pass structural tests; visual/provenance review is required. Do not automatically assume minority pixels are manipulated or threshold nonbinary annotations.
+
+### 3. Review pairs and source relationships
+
+Edit `/kaggle/working/casia_audit/review.csv` using a CSV editor or pandas. Preserve the audited image/mask path, label and hash fields. For every row:
+
+- Set `action=include` and a reviewed `source_group`, or `action=exclude` with an explicit `reason`.
+- For included Tp rows, set `alignment_verified=true`, `polarity=white` or `black`, and `mask_source` identifying the trusted annotation release/review record.
+- Assign **the same source_group to the entire connected group of original images, donors, tampered derivatives and known duplicates**. Include authentic source images in that group. Different filenames do not prove independence. Group identifiers are deliberately not invented from unverified filename conventions.
+
+Rows start unapproved. Do not bulk-mark all masks verified without actual evidence. Missing, mismatched or corrupt pairs must be repaired from a verified source in a new staging dataset and re-audited, or explicitly excluded. The exporter requires every original row, including exclusions, so missing cases cannot disappear silently. Near-duplicate/donor relationships still require human auditing; exact duplicates with conflicting groups fail loader validation.
+
+Finalize only after review:
+
+```python
+!python scripts/audit_dataset.py finalize --audit-dir /kaggle/working/casia_audit --output /kaggle/working/casia_prepared --seed 42
+```
+
+This creates loader-compatible `all.csv`, `train.csv`, `val.csv`, `test.csv`, small `smoke_train.csv`/`smoke_val.csv`, `exclusions.csv`, `validated.json`, and `smoke.yaml`/`full.yaml`. Normalized mask PNGs go in `casia_prepared/masks/`: these are explicit 0/255 conversions or reviewer-selected polarity inversions of existing annotations, never inferred ground truth. Original hashes and polarity remain in provenance fields.
+
+All included samples are checked through the existing loader, including 256 x 256 resizing. The seeded group split uses approximate 70/15/15 group fractions; at least three groups are required. Review the exported per-split Au/Tp counts and group/class balance before accepting the split. Splits are not class-stratified. The smoke subset selects up to four images per class from train and validation only. No test sample participates in model selection. Export directories must be empty; failed export may leave diagnostic partial files but no `validated.json`, so the Kaggle runner will refuse training. Use a new export directory after fixing the issue.
+
+### 4. Real-data smoke training, then explicit full training
+
+```python
+!python scripts/kaggle_setup.py smoke --prepared /kaggle/working/casia_prepared
+```
+
+This runs the existing training command for one epoch, batch size 2, using reviewed real train/validation subsets at 256 x 256. It uses CUDA when available and otherwise CPU. Inspect finite losses, dataset overlays, counts and the saved checkpoint before proceeding. Its scores are a sanity check, not thesis results.
+
+Full training is a separate command; the runner requires a completed smoke checkpoint, explicit acknowledgment of its review, verified files unchanged since export, and available CUDA:
+
+```python
+!python scripts/kaggle_setup.py full --prepared /kaggle/working/casia_prepared --confirm-smoke-reviewed
+```
+
+Full defaults remain 30 epochs, batch size 8, AdamW 1e-4 and the existing U-Net. To fit GPU memory, edit `full.yaml` before the first full run (for example batch size 4). Dataset root and manifest selection must remain those validated by export. Outputs are separate:
+
+```text
+/kaggle/working/casia_prepared/
+  smoke/checkpoints/{best.pt,last.pt,config.yaml}
+  smoke/outputs/history.csv
+  full/checkpoints/{best.pt,last.pt,config.yaml}
+  full/outputs/history.csv
+```
+
+Resume with:
+
+```python
+!python scripts/kaggle_setup.py full --prepared /kaggle/working/casia_prepared --confirm-smoke-reviewed --resume /kaggle/working/casia_prepared/full/checkpoints/last.pt
+```
+
+Kaggle's working directory is the output location, not a guarantee of survival after an unsaved session. Save a notebook version **with outputs** and download important checkpoints; follow [Kaggle notebook output documentation](https://www.kaggle.com/docs/notebooks). Restore the exported masks/manifests, configurations, smoke checkpoint and resume checkpoint at the same paths for a later session: dataset fingerprints bind resume to those paths and contents. A plain notebook draft save is insufficient. Avoid blindly rerunning setup/audit/full commands over existing results; the workflow intentionally refuses overwriting audit/export directories and fresh training artifacts.
+
+For a terminal rather than notebook, remove the leading `!` from these commands and replace `{CASIA_ROOT}` with the exact attached dataset path. No full training is launched by setup, scan or finalize.
 
 ## Verification
 
