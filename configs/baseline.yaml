@@ -1,7 +1,7 @@
 # Paths are relative to the repository root; run future scripts from there.
 # Replace these paths to match your local or Google Drive dataset layout.
 seed: 42
-device: auto  # Planned: CUDA when available, otherwise CPU.
+device: auto  # CUDA when available, otherwise CPU.
 
 dataset:
   name: casia_v2
@@ -23,6 +23,7 @@ model:
   name: unet
   in_channels: 3
   out_channels: 1
+  base_channels: 16
 
 training:
   batch_size: 8
@@ -31,9 +32,14 @@ training:
   optimizer: AdamW
   weight_decay: 0.01
   loss:
-    name: bce_with_logits_plus_dice  # Planned, not implemented.
+    name: bce_with_logits_plus_dice
     bce_weight: 1.0
     dice_weight: 1.0
+    smooth: 1.0
+  early_stopping:
+    monitor: dice  # dice (maximize) or loss (minimize); best.pt always uses Dice.
+    patience: 10
+    min_delta: 0.0
   num_workers: 0  # Simple initial setting for Windows and notebooks.
 
 evaluation:
