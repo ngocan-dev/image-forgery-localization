@@ -1,0 +1,50 @@
+# Python and packaging
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+# Environments
+.venv/
+venv/
+env/
+# Dataset and generated artifact directories: retain empty scaffolds
+/data/**
+!/data/**/
+!/data/**/.gitkeep
+/checkpoints/**
+!/checkpoints/**/
+!/checkpoints/**/.gitkeep
+/outputs/**
+!/outputs/**/
+!/outputs/**/.gitkeep
+/reports/**
+!/reports/**/
+!/reports/**/.gitkeep
+*.pt
+*.pth
+*.ckpt
+*.onnx
+# Notebook and editor temporary files
+.ipynb_checkpoints/
+.vscode/
+.idea/
+*.tmp
+*.temp
+*.swp
+*~
+*.log
+.DS_Store
+Thumbs.db
+# Local secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
