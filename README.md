@@ -105,9 +105,33 @@ data/raw/Tp/edited.png,data/masks/edited_mask.png,Tp,source_001,true,reviewed_an
 
 For every tampered row, supply a verified mask, `mask_verified=true`, and a nonempty `mask_source` identifying the annotation release or review record. This field records your attestation; the loader cannot independently verify provenance or whether a same-size mask describes the correct manipulated region. Authentic rows must leave `mask_path` empty and receive zeros.
 
-Validation occurs at construction, decoding every listed image and mask. The loader rejects unreadable/missing files, duplicate image paths, reused mask paths, unknown labels, missing groups, mismatched original dimensions, nonbinary or colored/alpha masks, and tampered masks with no foreground. Masks may use grayscale 0/1 or 0/255 (including bilevel and grayscale RGB/palette encodings); 1/255 means manipulated. Other conventions must be reviewed and converted explicitly before loading. Non-default EXIF orientation is rejected so images cannot rotate independently from their annotations.
+Validation occurs at construction, decoding every listed image and mask. The loader rejects unreadable/missing files, duplicate image paths, reused mask paths, unknown labels, missing groups, mismatched original dimensions, unapproved nonbinary masks, nonidentical RGB channels or nonopaque alpha, and tampered masks with no foreground. Masks may use grayscale, RGB or RGBA 0/1 or 0/255 (also bilevel and grayscale palette encodings). RGB channels must be identical; RGBA alpha must equal 255 at every pixel. In the loader, nonzero binary values mean manipulated; black-foreground source masks must be explicitly inverted during reviewed export. Other conventions require review; intermediate grayscale values are rejected unless thresholding is explicitly approved as described below. Non-default EXIF orientation is rejected so images cannot rotate independently from their annotations.
 
 RGB images are converted to three channels, resized with bilinear interpolation, and scaled to float32 [0,1]. Masks use nearest-neighbor interpolation and return float32 0/1. If resizing removes all annotated foreground, access fails explicitly rather than returning an authentic-looking target. Files must remain unchanged after the initial audit. No augmentation is applied.
+
+### Supported mask formats and explicitly approved thresholding
+
+The loader and audit now use one shared decoder (`datasets/mask_utils.py`):
+
+- Grayscale (`L`), bilevel (`1`), RGB and RGBA are supported. Palette images are decoded to RGB/RGBA and subjected to the same checks.
+- RGB channels must be exactly identical at every pixel, including intermediate-valued pixels. No luminance averaging is used to hide color disagreement.
+- RGBA must have alpha **255 everywhere**. A single transparent or partially transparent pixel is rejected, even with threshold approval. Transparency metadata is checked through RGBA decoding as well.
+- Strict binary 0/1 and 0/255 masks are accepted unchanged in meaning. Binary 0/1 masks are never erased by applying a 127 threshold.
+- Intermediate grayscale values are rejected by default, even if only one pixel is affected. For reviewed masks, the default threshold is **127**, using `value > 127`: values 0–127 become 0 and 128–255 become 1. Thresholding occurs before nearest-neighbor resizing. An optional integer threshold from 0 through 254 can be selected explicitly.
+- Threshold approval never overrides missing/ambiguous pair checks, dimension checks, mask provenance, semantic alignment, or polarity review. Mask dimensions must still match before resizing; even alignment approval does not authorize resizing a mismatched original annotation.
+
+For the six reported intermediate-valued masks, first re-run `scan` into a new audit directory. `review.csv`/`audit.json` now record `intermediate_pixels`; `mask_threshold` defaults to 127, while `threshold_approved` remains blank. Scan does **not** threshold them or generate binary overlays for them before approval. Inspect their original grayscale masks and alignment at full resolution, then set only the relevant reviewed rows:
+
+```text
+threshold_approved=true
+mask_threshold=127
+```
+
+These settings are additional to `action=include`, `source_group`, `alignment_verified=true`, explicit `polarity=white|black`, and `mask_source`. Run the existing `finalize` command afterward. Export first thresholds the grayscale channel, then inverts only if the reviewer selected black foreground. It records the threshold/approval in `mask_source` and writes normalized binary PNGs. The original files remain unchanged. The unchanged training pipeline reads those normalized masks without additional options.
+
+For an already curated loader manifest referencing intermediate-valued masks directly, optional CSV columns `threshold_approved` and `mask_threshold` provide the same per-sample settings. Existing six-column manifests remain strict and backward-compatible. Approval must be `true`; blank/`false` does not enable thresholding. These columns do not replace `mask_verified=true` and nonempty `mask_source`; direct loader manifests must already use the verified white/nonzero-foreground convention. Changing preprocessing settings is a dataset change and invalidates existing training checkpoint fingerprints. Prefer audited export for raw CASIA masks so polarity and alignment decisions remain recorded.
+
+The 1,026 reportedly valid opaque RGB/RGBA masks should require no thresholding under these rules. Re-run the audit on Colab to verify the actual affected files; the six sparse intermediate-value masks are **not automatically approved** based on the reported count.
 
 ### Load samples and inspect them
 
@@ -293,7 +317,7 @@ Before real CASIA training, obtain permitted images and verified masks, inspect 
 
 ## Kaggle CASIA2 workflow
 
-**Real dataset status:** no CASIA2 files or Kaggle input mount were accessible in the development environment. The reported 7,492 Au, 5,124 Tp and 5,123 Groundtruth files are user-supplied expectations, not verified counts. A one-file count difference does not establish which mask is missing or prove all other pairs are valid. No Kaggle real-data smoke run or full training has been performed here.
+**Real dataset status:** the user reports a Google Colab audit with 7,492 Au, 5,124 Tp and 5,123 Groundtruth files. Of 1,032 masks flagged by the former colored/alpha rejection, 1,026 reportedly have valid binary RGB and fully opaque alpha; six reportedly have 1–16 intermediate grayscale pixels each. These are user-reported real-data observations, not independently verified in this local environment. A one-file count difference does not establish which mask is missing or prove all other pairs are valid. No Kaggle real-data smoke run or full training has been performed here.
 
 ### 1. Attach inputs and set up the runtime
 
@@ -333,7 +357,7 @@ Audit outputs:
 - `review.csv`: row-by-row structural issues, white-pixel fraction and blank approval fields.
 - `previews/000000.png`, etc.: RGB, original mask, white-foreground overlay and black-foreground overlay. Filenames are zero-based row indices in `audit.json`; authentic rows have no mask preview. Default 24 is a diagnostic sample, **not evidence that all pairs align**. Increase `--preview-limit` (for example 6000) in a new audit directory to render all pair candidates. Inspect original-resolution pairs when thumbnails are inconclusive.
 
-Counts and pixel statistics cannot establish polarity. Compare overlays with visible edits and trusted annotation documentation. A correct-dimension but wrong-image mask can pass structural tests; visual/provenance review is required. Do not automatically assume minority pixels are manipulated or threshold nonbinary annotations.
+Counts and pixel statistics cannot establish polarity. Compare overlays with visible edits and trusted annotation documentation. A correct-dimension but wrong-image mask can pass structural tests; visual/provenance review is required. Do not automatically assume minority pixels are manipulated. Intermediate grayscale values require per-mask threshold approval; see the format rules below.
 
 ### 3. Review pairs and source relationships
 

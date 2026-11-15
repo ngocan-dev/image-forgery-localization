@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 import torch
 from torch.utils.data import Dataset, Subset
+from forgery_localization.datasets.mask_utils import read_mask_values, binarize_mask, threshold_options
 
 
 _FIELDS = {"image_path", "mask_path", "label", "source_group", "mask_verified", "mask_source"}
@@ -28,29 +29,14 @@ def _read_rgb(path: Path) -> Image.Image:
         return image.convert("RGB")
 
 
-def _read_mask(path: Path, size: tuple[int, int]) -> Image.Image:
-    with Image.open(path) as mask:
-        if mask.size != size:
-            raise ValueError(f"Mask dimensions {mask.size} mismatch image {size}: {path}")
-        if mask.getexif().get(274, 1) != 1:
-            raise ValueError(f"Non-default mask orientation: {path}")
-        # Accept bilevel/grayscale or visually grayscale RGB/palette masks.
-        # Reject colored/alpha annotations rather than guessing a foreground rule.
-        if mask.mode == "P":
-            if "transparency" in mask.info:
-                raise ValueError(f"Transparent mask is unsupported: {path}")
-            mask = mask.convert("RGB")
-        array = np.asarray(mask)
-        if array.ndim == 3:
-            if array.shape[2] != 3 or not np.all(array == array[..., :1]):
-                raise ValueError(f"Mask must be grayscale, not colored or alpha: {path}")
-            array = array[..., 0]
-        values = set(np.unique(array).tolist())
-        if array.ndim != 2 or not (values <= {0, 1} or values <= {0, 255}):
-            raise ValueError(f"Mask must use binary 0/1 or 0/255 values: {path}")
-        if not np.any(array):
-            raise ValueError(f"Tampered mask has no foreground: {path}")
-        return Image.fromarray((array > 0).astype(np.uint8))
+def _read_mask(path: Path, size: tuple[int, int], **options) -> Image.Image:
+    values = read_mask_values(path)
+    if values.shape != (size[1], size[0]):
+        raise ValueError(f"Mask dimensions mismatch image {size}: {path}")
+    binary = binarize_mask(values, **options)
+    if not binary.any():
+        raise ValueError(f"Tampered mask has no foreground: {path}")
+    return Image.fromarray(binary.astype(np.uint8))
 
 
 class CASIADataset(Dataset):
@@ -81,7 +67,7 @@ class CASIADataset(Dataset):
         records, seen_images, seen_masks, content_groups = [], set(), set(), {}
         for line, row in enumerate(rows, start=2):
             try:
-                row = {key: (row.get(key) or "").strip() for key in _FIELDS}
+                row = {key: (row.get(key) or "").strip() for key in _FIELDS | ({"threshold_approved", "mask_threshold"} & row.keys())}
                 label = _LABELS.get(row["label"].lower())
                 if label is None:
                     raise ValueError("label must be Au/authentic or Tp/tampered")
@@ -106,7 +92,7 @@ class CASIADataset(Dataset):
                     seen_masks.add(mask_path)
                 rgb = _read_rgb(image_path)
                 if mask_path is not None:
-                    _read_mask(mask_path, rgb.size)
+                    _read_mask(mask_path, rgb.size, **threshold_options(row))
                 # Decoded-pixel hashing also catches identical images in different
                 # lossless encodings; near-duplicates still need a curator audit.
                 digest = hashlib.sha256(str(rgb.size).encode() + rgb.tobytes()).hexdigest()
@@ -132,7 +118,7 @@ class CASIADataset(Dataset):
         if record["mask_path"] is None:
             mask = np.zeros((height, width), dtype=np.float32)
         else:
-            original = _read_mask(record["mask_path"], rgb.size)
+            original = _read_mask(record["mask_path"], rgb.size, **threshold_options(record))
             mask = np.array(original.resize((width, height), Image.Resampling.NEAREST),
                             dtype=np.float32)
             if not mask.any():

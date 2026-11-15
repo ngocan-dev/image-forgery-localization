@@ -9,11 +9,12 @@ import numpy as np
 from PIL import Image, ImageDraw
 import yaml
 
+from forgery_localization.datasets.mask_utils import read_mask_values, binarize_mask, threshold_options
 from forgery_localization.datasets.casia_dataset import CASIADataset, split_dataset, validate_split_isolation
 
 FIELDS = ['image_path', 'mask_path', 'label', 'source_group', 'mask_verified', 'mask_source']
 REVIEW = ['image_path', 'mask_path', 'label', 'image_sha256', 'mask_sha256', 'status',
-          'white_fraction', 'action', 'reason', 'source_group', 'alignment_verified', 'polarity', 'mask_source']
+          'intermediate_pixels', 'threshold_approved', 'mask_threshold', 'white_fraction', 'action', 'reason', 'source_group', 'alignment_verified', 'polarity', 'mask_source']
 
 
 def sha(path):
@@ -27,22 +28,8 @@ def write_csv(path, rows, fields):
         writer.writerows(rows)
 
 
-def binary_mask(path):
-    with Image.open(path) as source:
-        if source.getexif().get(274, 1) != 1:
-            raise ValueError('mask EXIF rotation requires paired preprocessing')
-        if source.mode == 'P':
-            if 'transparency' in source.info: raise ValueError('transparent mask')
-            source = source.convert('RGB')
-        array = np.array(source)
-    if array.ndim == 3:
-        if array.shape[2] != 3 or not np.all(array == array[..., :1]):
-            raise ValueError('colored/alpha mask')
-        array = array[..., 0]
-    values = set(np.unique(array).tolist())
-    if array.ndim != 2 or not (values <= {0, 1} or values <= {0, 255}):
-        raise ValueError('mask is not binary 0/1 or 0/255')
-    return array > 0
+def binary_mask(path, **options):
+    return binarize_mask(read_mask_values(path), **options)
 
 
 def read_rgb(path):
@@ -104,7 +91,13 @@ def audit(root, output, suffix='_gt', preview_limit=24):
             try:
                 rgb = read_rgb(image_path)
                 if mask_path:
-                    mask = binary_mask(mask_path)
+                    values = read_mask_values(mask_path)
+                    # Binary 0/1 is a valid encoding, not a threshold candidate.
+                    is_binary = set(np.unique(values).tolist()) <= {0, 1} or set(np.unique(values).tolist()) <= {0, 255}
+                    row['intermediate_pixels'] = 0 if is_binary else int(((values > 0) & (values < 255)).sum())
+                    row['mask_threshold'] = 127
+                    if values.shape != (rgb.height, rgb.width): raise ValueError('dimension_mismatch')
+                    mask = binarize_mask(values)
                     row['white_fraction'] = float(mask.mean())
                     if mask.shape != (rgb.height, rgb.width): raise ValueError('dimension_mismatch')
                     if mask.all() or not mask.any(): problems.append('constant_mask_requires_review')
@@ -157,7 +150,7 @@ def finalize(audit_dir, destination, seed=42):
                 raise ValueError('Missing or changed mask')
             if row['alignment_verified'].lower() != 'true' or row['polarity'] not in ('white', 'black') or not row['mask_source'].strip():
                 raise ValueError('Tampered rows require alignment_verified=true, white/black polarity and mask_source')
-            mask = binary_mask(row['mask_path'])
+            mask = binary_mask(row['mask_path'], **threshold_options(row))
             if mask.shape != (rgb.height, rgb.width): raise ValueError('Mask/image dimensions mismatch')
             if row['polarity'] == 'black': mask = ~mask
             if not mask.any(): raise ValueError('Reviewed tampered mask has no foreground')
@@ -169,13 +162,13 @@ def finalize(audit_dir, destination, seed=42):
     for i, row in enumerate(accepted):
         target = ''
         if row['label'] == 'Tp':
-            mask = binary_mask(row['mask_path'])
+            mask = binary_mask(row['mask_path'], **threshold_options(row))
             if row['polarity'] == 'black': mask = ~mask
             target = str(destination / 'masks' / f'{i:06d}.png')
             Image.fromarray(mask.astype(np.uint8) * 255).save(target)
         records.append(dict(image_path=row['image_path'], mask_path=target, label=row['label'],
                             source_group=row['source_group'].strip(), mask_verified='true' if target else '',
-                            mask_source=row['mask_source'] + f"; original={row['mask_path']}; sha256={row['mask_sha256']}; foreground={row['polarity']}" if target else ''))
+                            mask_source=row['mask_source'] + f"; original={row['mask_path']}; sha256={row['mask_sha256']}; foreground={row['polarity']}; threshold_approved={threshold_options(row)['threshold_approved']}; threshold={threshold_options(row)['threshold']}" if target else ''))
     write_csv(destination / 'all.csv', records, FIELDS)
     dataset = CASIADataset(destination / 'all.csv')
     # Check resizing too, including tiny foreground that disappears at 256x256.
