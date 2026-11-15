@@ -116,3 +116,37 @@ def test_audit_requires_per_mask_threshold_and_polarity_review(fixture):
     index = next(i for i, r in enumerate(dataset.records) if r['image_path'].name == 'Tp_0.png')
     np.testing.assert_array_equal(dataset[index][1][0], ~(gray > 127))
     assert 'threshold_approved=True; threshold=127' in dataset.records[index]['mask_source']
+
+
+@pytest.mark.parametrize('mode', ['RGB', 'RGBA'])
+@pytest.mark.parametrize('count', [0, 1, 16])
+def test_sparse_intermediate_pixel_audit_summary(fixture, mode, count):
+    root, output, destination = fixture
+    path = root / 'Groundtruth/Tp_0_gt.png'
+    gray = np.zeros((32, 32), np.uint8)
+    gray[8:24, 8:24] = 255
+    gray[0, :count] = 127
+    save_mask(path, gray, mode)
+    report = audit.audit(root, output, preview_limit=0)
+    assert report['mask_value_summary'] == {
+        'binary_valued_masks': 6 if count == 0 else 5,
+        'masks_with_intermediate_values': int(count > 0),
+        'intermediate_pixels_total': count,
+    }
+    row = next(r for r in report['rows'] if r['mask_path'] == str(path))
+    assert row['intermediate_pixels'] == count
+    assert row['threshold_approved'] == ''
+    assert row['alignment_verified'] == ''
+    assert row['polarity'] == ''
+    assert ('approval' in row['status']) == (count > 0)
+    with pytest.raises(ValueError, match='Every row'):
+        audit.finalize(output, destination)
+
+
+@pytest.mark.parametrize('mode', ['L', 'RGB'])
+def test_png_transparency_metadata_cannot_bypass_alpha_check(tmp_path, mode):
+    path = tmp_path / 'transparent.png'
+    image = Image.new(mode, (4, 4), 0 if mode == 'L' else (0, 0, 0))
+    image.save(path, transparency=0 if mode == 'L' else (0, 0, 0))
+    with pytest.raises(ValueError, match='alpha'):
+        audit.binary_mask(path, threshold_approved=True)

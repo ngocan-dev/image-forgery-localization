@@ -114,7 +114,12 @@ def audit(root, output, suffix='_gt', preview_limit=24):
     report = dict(root=str(root), counts={k: len(v) for k, v in files.items()},
                   expected_counts_user_supplied={'Au': 7492, 'Tp': 5124, 'Groundtruth': 5123},
                   rows=rows, orphan_masks=[str(p) for p in files['Groundtruth'] if p not in used],
-                  mask_suffix=suffix, polarity_verified=False, semantic_alignment_verified=False)
+                  mask_suffix=suffix, polarity_verified=False, semantic_alignment_verified=False,
+                  mask_value_summary={
+                      'binary_valued_masks': sum(r['intermediate_pixels'] == 0 for r in rows),
+                      'masks_with_intermediate_values': sum(isinstance(r['intermediate_pixels'], int) and r['intermediate_pixels'] > 0 for r in rows),
+                      'intermediate_pixels_total': sum(r['intermediate_pixels'] for r in rows if isinstance(r['intermediate_pixels'], int)),
+                  })
     (output / 'audit.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     print(json.dumps({k: v for k, v in report.items() if k != 'rows'}, indent=2))
     return report

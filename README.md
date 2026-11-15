@@ -82,6 +82,16 @@ For a local GPU, install a PyTorch build matching your GPU driver and CUDA envir
 
 For Google Colab, place or clone this repository into the runtime, check `!python --version`, change into the repository root using `%cd`, and run `%pip install -e ".[dev]"`. This scaffold targets Python 3.11; if the runtime uses another version, select/provision a compatible runtime before installing. Mount Google Drive only if needed and configure absolute dataset/output paths there. Select a GPU runtime for later training; smoke tests do not require one. No code depends on a Windows-specific path.
 
+### Python 3.13 and Colab compatibility review
+
+The declared Python range remains `>=3.11,<3.12`; it has **not** been widened. Local tests run on Python 3.14 CPU are evidence for that test environment only, not validation of Python 3.13, Colab GPU execution or every optional analysis dependency. Python 3.13 and CUDA were unavailable locally during this review. The local environment passed `pip check` for its installed packages, but OpenCV and scikit-learn were not installed; full dependency-set compatibility is therefore unverified.
+
+Colab now lists Python 3.13 runtimes in its [official runtime documentation](https://research.google.com/colaboratory/runtime-version-faq.html). Check your actual runtime instead of assuming its version. Modern PyTorch releases support Python 3.13 according to the [official release compatibility matrix](https://github.com/pytorch/pytorch/blob/main/RELEASE.md), but the project's lower bounds are not a tested Python 3.13 dependency lock. PyTorch availability alone does not validate NumPy, Pillow, OpenCV, Matplotlib, scikit-learn, PyYAML and pytest together.
+
+For a compatibility investigation on Colab, record `sys.version`, `torch.__version__`, `torch.version.cuda` and `torch.cuda.is_available()`. Resolve the canonical `pyproject.toml` dependencies for that interpreter, preserve a compatible GPU PyTorch build, run `python -m pip check`, import every dependency, and run the full test suite plus a CUDA synthetic training/checkpoint smoke test. Save exact resolved package versions. A successful dependency resolver or source-layout pytest run alone is not permission to widen the package's Python constraints. Ordinary editable installation on Python 3.13 currently fails the declared Python requirement by design; prefer a compatible Python 3.11 environment for supported installation.
+
+Audit summaries now count decoded binary masks, masks with intermediate values, and total intermediate pixels. These describe pixel encodings only: they do not approve pairing, dimensions, semantic alignment or polarity. In particular, the six reported sparse masks still require individual threshold approval even when each has only 1â€“16 nonbinary pixels.
+
 ## Dataset requirements
 
 Download or obtain CASIA v2 separately under its applicable terms. The project assumes nothing is already downloaded. Set `authentic_dir`, `tampered_dir`, `masks_dir`, `processed_dir` and the three manifest paths in the YAML. Relative paths are intended to resolve from the repository root; absolute paths can point to external storage.
@@ -117,7 +127,7 @@ The loader and audit now use one shared decoder (`datasets/mask_utils.py`):
 - RGB channels must be exactly identical at every pixel, including intermediate-valued pixels. No luminance averaging is used to hide color disagreement.
 - RGBA must have alpha **255 everywhere**. A single transparent or partially transparent pixel is rejected, even with threshold approval. Transparency metadata is checked through RGBA decoding as well.
 - Strict binary 0/1 and 0/255 masks are accepted unchanged in meaning. Binary 0/1 masks are never erased by applying a 127 threshold.
-- Intermediate grayscale values are rejected by default, even if only one pixel is affected. For reviewed masks, the default threshold is **127**, using `value > 127`: values 0–127 become 0 and 128–255 become 1. Thresholding occurs before nearest-neighbor resizing. An optional integer threshold from 0 through 254 can be selected explicitly.
+- Intermediate grayscale values are rejected by default, even if only one pixel is affected. For reviewed masks, the default threshold is **127**, using `value > 127`: values 0Ã¢â‚¬â€œ127 become 0 and 128Ã¢â‚¬â€œ255 become 1. Thresholding occurs before nearest-neighbor resizing. An optional integer threshold from 0 through 254 can be selected explicitly.
 - Threshold approval never overrides missing/ambiguous pair checks, dimension checks, mask provenance, semantic alignment, or polarity review. Mask dimensions must still match before resizing; even alignment approval does not authorize resizing a mismatched original annotation.
 
 For the six reported intermediate-valued masks, first re-run `scan` into a new audit directory. `review.csv`/`audit.json` now record `intermediate_pixels`; `mask_threshold` defaults to 127, while `threshold_approved` remains blank. Scan does **not** threshold them or generate binary overlays for them before approval. Inspect their original grayscale masks and alignment at full resolution, then set only the relevant reviewed rows:
@@ -317,7 +327,7 @@ Before real CASIA training, obtain permitted images and verified masks, inspect 
 
 ## Kaggle CASIA2 workflow
 
-**Real dataset status:** the user reports a Google Colab audit with 7,492 Au, 5,124 Tp and 5,123 Groundtruth files. Of 1,032 masks flagged by the former colored/alpha rejection, 1,026 reportedly have valid binary RGB and fully opaque alpha; six reportedly have 1–16 intermediate grayscale pixels each. These are user-reported real-data observations, not independently verified in this local environment. A one-file count difference does not establish which mask is missing or prove all other pairs are valid. No Kaggle real-data smoke run or full training has been performed here.
+**Real dataset status:** the user reports a Google Colab audit with 7,492 Au, 5,124 Tp and 5,123 Groundtruth files. Of 1,032 masks flagged by the former colored/alpha rejection, 1,026 reportedly have valid binary RGB and fully opaque alpha; six reportedly have 1Ã¢â‚¬â€œ16 intermediate grayscale pixels each. These are user-reported real-data observations, not independently verified in this local environment. A one-file count difference does not establish which mask is missing or prove all other pairs are valid. No Kaggle real-data smoke run or full training has been performed here.
 
 ### 1. Attach inputs and set up the runtime
 
