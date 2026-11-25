@@ -49,10 +49,12 @@ class CASIADataset(Dataset):
     """
 
     def __init__(self, manifest: str | Path, root: str | Path = ".",
-                 image_size: tuple[int, int] = (256, 256)) -> None:
+                 image_size: tuple[int, int] = (256, 256), perturbation=None) -> None:
         if len(image_size) != 2 or any(type(n) is not int or n < 1 for n in image_size):
             raise ValueError("image_size must contain positive integer (height, width)")
         self.image_size = tuple(image_size)
+        # Optional (PIL image, key) -> PIL image, applied before resizing (robustness tests)
+        self.perturbation = perturbation
         root = Path(root).resolve()
         manifest = Path(manifest)
         if not manifest.is_absolute():
@@ -112,6 +114,11 @@ class CASIADataset(Dataset):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         record = self.records[index]
         rgb = _read_rgb(record["image_path"])
+        if self.perturbation is not None:
+            perturbed = self.perturbation(rgb, str(record["image_path"]))
+            if perturbed.size != rgb.size:
+                raise ValueError("A perturbation must keep the image size")
+            rgb = perturbed
         height, width = self.image_size
         image = np.array(rgb.resize((width, height), Image.Resampling.BILINEAR),
                          dtype=np.float32) / 255.0

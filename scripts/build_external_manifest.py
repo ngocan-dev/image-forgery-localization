@@ -5,6 +5,11 @@ Presets
 coverage  COVERAGE copy-move dataset (Wen et al., 2016) laid out as
           ``<root>/image/{n}.tif`` (authentic), ``<root>/image/{n}t.tif``
           (tampered) and ``<root>/mask/{n}forged.tif`` (tampered region).
+columbia  Columbia Uncompressed Image Splicing Detection dataset (Hsu & Chang,
+          2006): ``4cam_auth/*.tif`` (authentic), ``4cam_splc/*.tif`` (spliced)
+          and ``*_edgemask.jpg`` colour masks. The spliced region is the
+          red-dominant area of the edge mask (``--columbia-region green`` flips
+          it); binary PNG masks are written to ``--mask-out-dir``.
 generic   Any dataset with an authentic folder, a tampered folder and a mask
           folder; masks are found with ``--mask-pattern`` (``{stem}`` = image
           file name without extension), e.g. ``{stem}_gt.png``.
@@ -55,6 +60,44 @@ def coverage_rows(root: Path) -> tuple[list[dict], list[str]]:
             continue
         rows.append({"image_path": path, "mask_path": candidates[0], "label": "Tp", "source_group": group,
                      "mask_source": "COVERAGE mask/{n}forged"})
+    return rows, problems
+
+
+def columbia_mask(edgemask: Path, region: str = "red") -> np.ndarray:
+    """Binary mask of the region whose colour dominates the Columbia edge mask."""
+    with Image.open(edgemask) as image:
+        rgb = np.asarray(image.convert("RGB"), dtype=np.int16)
+    red, green, blue = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    if region == "red":
+        return (red >= 128) & (red - green >= 50) & (red - blue >= 50)
+    return (green >= 128) & (green - red >= 50) & (green - blue >= 50)
+
+
+def columbia_rows(root: Path, mask_out: Path, region: str) -> tuple[list[dict], list[str]]:
+    rows, problems = [], []
+    authentic = sorted(p for p in root.rglob("*.tif") if "4cam_auth" in p.parts)
+    spliced = sorted(p for p in root.rglob("*.tif") if "4cam_splc" in p.parts)
+    if not authentic or not spliced:
+        problems.append(f"Expected 4cam_auth/ and 4cam_splc/ folders of .tif files under {root}")
+    edgemasks = {p.name.lower(): p for p in root.rglob("*_edgemask.*")}
+    mask_out.mkdir(parents=True, exist_ok=True)
+    rows += [{"image_path": p, "mask_path": "", "label": "Au", "source_group": f"columbia_{p.stem}"}
+             for p in authentic]
+    for path in spliced:
+        source = next((edgemasks[n] for n in (f"{path.stem}_edgemask.jpg".lower(),
+                                              f"{path.stem}_edgemask.png".lower()) if n in edgemasks), None)
+        if source is None:
+            problems.append(f"No edge mask for {path.name}")
+            continue
+        binary = columbia_mask(source, region)
+        if not binary.any():
+            problems.append(f"Empty {region} region in {source.name}: {path.name}")
+            continue
+        target = mask_out / f"{path.stem}_mask.png"
+        Image.fromarray(binary.astype(np.uint8) * 255).save(target)
+        rows.append({"image_path": path, "mask_path": target, "label": "Tp",
+                     "source_group": f"columbia_{path.stem}",
+                     "mask_source": f"Columbia edgemask, {region}-dominant region"})
     return rows, problems
 
 
@@ -118,8 +161,13 @@ def write_preview(rows: list[dict], path: Path, count: int, threshold: int | Non
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("preset", choices=("coverage", "generic"))
-    parser.add_argument("--dataset-root", help="coverage: folder containing image/ and mask/")
+    parser.add_argument("preset", choices=("coverage", "columbia", "generic"))
+    parser.add_argument("--dataset-root", help="coverage: folder containing image/ and mask/; "
+                                               "columbia: folder containing 4cam_auth/ and 4cam_splc/")
+    parser.add_argument("--columbia-region", choices=("red", "green"), default="red",
+                        help="Colour of the spliced region in the Columbia edge masks")
+    parser.add_argument("--mask-out-dir", default=None,
+                        help="columbia: where binary PNG masks are written (default: next to --output)")
     parser.add_argument("--authentic-dir")
     parser.add_argument("--tampered-dir")
     parser.add_argument("--mask-dir")
@@ -139,6 +187,11 @@ def main(argv=None):
         if not args.dataset_root:
             parser.error("coverage requires --dataset-root")
         rows, problems = coverage_rows(Path(args.dataset_root))
+    elif args.preset == "columbia":
+        if not args.dataset_root:
+            parser.error("columbia requires --dataset-root")
+        mask_out = Path(args.mask_out_dir) if args.mask_out_dir else Path(args.output).parent / "columbia_masks"
+        rows, problems = columbia_rows(Path(args.dataset_root), mask_out, args.columbia_region)
     else:
         if not (args.tampered_dir and args.mask_dir):
             parser.error("generic requires --tampered-dir and --mask-dir")

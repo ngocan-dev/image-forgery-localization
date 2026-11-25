@@ -37,6 +37,7 @@ from forgery_localization.evaluation.image_metrics import (
 )
 from forgery_localization.evaluation.postprocess import SCORE_METHODS, image_score
 from forgery_localization.inference import Predictor, render_overlay
+from forgery_localization.perturbations import parse_perturbation
 
 
 def parse_args(argv=None):
@@ -58,6 +59,8 @@ def parse_args(argv=None):
                         help="Override; default is thresholds.json next to each checkpoint")
     parser.add_argument("--isolation-manifests", nargs="*", default=[],
                         help="Train/val manifests that must not overlap with --manifest")
+    parser.add_argument("--perturb", default="none",
+                        help="Robustness test: jpeg:Q, resize:F, noise:S or blur:R (applied before resizing)")
     parser.add_argument("--save-visuals", type=int, default=0,
                         help="Save N best, N worst tampered and N worst authentic examples")
     return parser.parse_args(argv)
@@ -146,7 +149,11 @@ def main(argv=None) -> None:
     args = parse_args(argv)
     if args.calibrate and "test" in args.dataset_name.lower():
         raise SystemExit("Refusing to calibrate thresholds on a test set; calibrate on validation.")
-    dataset = CASIADataset(args.manifest, root=args.root, image_size=tuple(args.image_size))
+    perturbation = parse_perturbation(args.perturb)
+    if args.calibrate and perturbation is not None:
+        raise SystemExit("Calibrate on clean validation images only (no --perturb).")
+    dataset = CASIADataset(args.manifest, root=args.root, image_size=tuple(args.image_size),
+                           perturbation=perturbation)
     if args.isolation_manifests:
         others = [CASIADataset(m, root=args.root, image_size=tuple(args.image_size))
                   for m in args.isolation_manifests]
@@ -193,6 +200,7 @@ def main(argv=None) -> None:
             "seed": predictor.config.get("seed"),
             "checkpoint": str(checkpoint),
             "checkpoint_epoch": predictor.config.get("checkpoint_epoch"),
+            "perturbation": args.perturb,
             "thresholds": thresholds,
             "pixel": pixel_summary(rows),
             "image": image_level,

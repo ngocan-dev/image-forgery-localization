@@ -216,3 +216,18 @@ def test_mask_removed_after_validation_does_not_become_zero(samples):
     (root / "mask1.png").unlink()
     with pytest.raises(FileNotFoundError):
         dataset[1]
+
+
+def test_perturbation_changes_image_not_mask(samples):
+    from forgery_localization.perturbations import parse_perturbation
+    root, rows = samples
+    path = manifest(root, rows)
+    clean = CASIADataset(path, root, image_size=(16, 20))
+    noisy = CASIADataset(path, root, image_size=(16, 20), perturbation=parse_perturbation('noise:20'))
+    image_clean, mask_clean = clean[1]
+    image_noisy, mask_noisy = noisy[1]
+    assert not torch.equal(image_clean, image_noisy)
+    assert torch.equal(mask_clean, mask_noisy)
+    resized = CASIADataset(path, root, perturbation=lambda image, key: image.resize((4, 4)))
+    with pytest.raises(ValueError):
+        resized[0]

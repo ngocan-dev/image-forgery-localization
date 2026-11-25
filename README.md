@@ -13,7 +13,9 @@ A pre-thesis research project using PyTorch, U-Net and CASIA v2 to predict where
 | Real/Fake + confidence score | `evaluation/postprocess.py`: image score = mean of top 1% pixel probabilities; threshold chosen on validation |
 | Mask, bounding boxes, suspicious area | `postprocess.summarize_prediction`, `inference.Predictor` |
 | IoU / Dice / Pixel-F1; Acc / P / R / F1 / AUC, confusion matrix | `scripts/evaluate.py`, `evaluation/image_metrics.py` |
-| Multi-dataset evaluation | `scripts/build_external_manifest.py` (Coverage preset, generic folders) |
+| Multi-dataset evaluation | `scripts/build_external_manifest.py` (Coverage and Columbia presets, generic folders) |
+| Robustness (JPEG, resize, noise, blur) | `perturbations.py`, `scripts/evaluate.py --perturb jpeg:70` |
+| Choice of the Real/Fake score | `scripts/score_study.py` (per-method thresholds and selection on validation only) |
 | Mean ± SD over seeds, generalization matrix | `scripts/summarize_results.py` |
 | Web demo | `app/demo.py` (Gradio), CLI `scripts/predict.py` |
 

@@ -18,7 +18,8 @@ from dataclasses import dataclass, asdict, field
 
 import numpy as np
 
-SCORE_METHODS = ("max", "top1pct_mean", "area_fraction")
+SCORE_METHODS = ("max", "top01pct_mean", "top1pct_mean", "top5pct_mean", "mean", "area_fraction")
+_TOP_FRACTIONS = {"top01pct_mean": 0.001, "top1pct_mean": 0.01, "top5pct_mean": 0.05}
 
 
 def _check_probability_map(probabilities: np.ndarray) -> np.ndarray:
@@ -37,16 +38,21 @@ def image_score(probabilities: np.ndarray, method: str = "top1pct_mean",
     """Aggregate a pixel map into one image-level manipulation score in [0, 1].
 
     ``max``           highest pixel probability (sensitive to single noisy pixels);
+    ``top01pct_mean`` mean of the 0.1% most suspicious pixels;
     ``top1pct_mean``  mean of the 1% most suspicious pixels (default, more stable);
+    ``top5pct_mean``  mean of the 5% most suspicious pixels;
+    ``mean``          mean probability over the whole image;
     ``area_fraction`` fraction of pixels >= pixel_threshold.
     """
     probabilities = _check_probability_map(probabilities)
     flat = probabilities.ravel()
     if method == "max":
         return float(flat.max())
-    if method == "top1pct_mean":
-        k = max(1, int(round(0.01 * flat.size)))
+    if method in _TOP_FRACTIONS:
+        k = max(1, int(round(_TOP_FRACTIONS[method] * flat.size)))
         return float(np.partition(flat, flat.size - k)[-k:].mean())
+    if method == "mean":
+        return float(flat.mean())
     if method == "area_fraction":
         return float((flat >= pixel_threshold).mean())
     raise ValueError(f"method must be one of {SCORE_METHODS}")
