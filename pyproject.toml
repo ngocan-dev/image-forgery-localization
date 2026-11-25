@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "forgery-localization"
 version = "0.1.0"
-description = "RGB image forgery localization research scaffold"
+description = "Image forgery detection and localization (U-Net / SegFormer, RGB + Noise + DCT)"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
@@ -16,10 +16,12 @@ dependencies = [
     "matplotlib>=3.8,<4",
     "scikit-learn>=1.4,<2",
     "PyYAML>=6,<7",
+    "segmentation-models-pytorch>=0.5,<0.7",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+demo = ["gradio>=4,<6"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
