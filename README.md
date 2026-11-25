@@ -2,7 +2,23 @@
 
 A pre-thesis research project using PyTorch, U-Net and CASIA v2 to predict where an image was manipulated.
 
-**Status: the RGB training and validation pipeline is implemented**, including U-Net, validated datasets, BCE + Dice loss, pixel metrics, early stopping and resumable checkpoints. Dataset auditing and a Kaggle setup/training workflow are available; standalone evaluate/predict commands remain scaffolds. No real CASIA training or research results are included; synthetic tests only verify software behavior.
+**Status:** U-Net–ResNet34 with RGB / RGB+Noise / RGB+DCT inputs (trained in Colab), SegFormer training, calibrated Real/Fake decision, pixel and image-level evaluation, cross-dataset manifests, single-image prediction and a Gradio web demo are implemented. Research results are produced in Colab with `notebooks/topic2_completion_colab.ipynb`; no results are stored in this repository.
+
+## Topic 2 completion workflow
+
+| Requirement (topic 2) | Implementation |
+| --- | --- |
+| U-Net baseline, Transformer upgrade | `models/factory.py`: `unet_resnet34`, `segformer_mit_b0/b2`, `unet_mit_b2` |
+| RGB vs RGB + Noise vs RGB + Frequency | `features.py` (identical to the Colab `controlled_multiseed_v1` protocol) |
+| Real/Fake + confidence score | `evaluation/postprocess.py`: image score = mean of top 1% pixel probabilities; threshold chosen on validation |
+| Mask, bounding boxes, suspicious area | `postprocess.summarize_prediction`, `inference.Predictor` |
+| IoU / Dice / Pixel-F1; Acc / P / R / F1 / AUC, confusion matrix | `scripts/evaluate.py`, `evaluation/image_metrics.py` |
+| Multi-dataset evaluation | `scripts/build_external_manifest.py` (Coverage preset, generic folders) |
+| Mean ± SD over seeds, generalization matrix | `scripts/summarize_results.py` |
+| Web demo | `app/demo.py` (Gradio), CLI `scripts/predict.py` |
+
+Order (never tune on test): train → `evaluate.py --calibrate` on validation → `evaluate.py` on CASIA test and external sets with frozen thresholds → `summarize_results.py` → `predict.py` / `app/demo.py`.
+The SegFormer runs use `scripts/train_multiinput.py`, which reproduces the notebook protocol (loss, flips, checkpoint selection) so CNN and Transformer are compared under identical settings.
 
 ## Research objective
 
