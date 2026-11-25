@@ -121,7 +121,8 @@ def mask_image(mask: np.ndarray) -> Image.Image:
 def report_text(summary: PredictionSummary, model_name: str = "") -> str:
     """Short human-readable report (Markdown)."""
     lines = [
-        f"**Result: {summary.label}** (confidence {100 * summary.confidence:.1f}%)",
+        f"**Result: {summary.label}** (decision margin {100 * summary.confidence:.1f}%: "
+        f"0% = at the threshold, 100% = maximally far from it)",
         f"- Image manipulation score: {summary.image_score:.3f} "
         f"(method `{summary.score_method}`, threshold {summary.image_threshold:.3f})",
         f"- Suspicious area: {summary.suspicious_area_pct:.2f}% of the image",
@@ -134,5 +135,5 @@ def report_text(summary: PredictionSummary, model_name: str = "") -> str:
         )
     if model_name:
         lines.append(f"- Model: {model_name}")
-    lines.append("- Note: scores are not calibrated probabilities; an empty mask does not prove authenticity.")
+    lines.append("- Note: the score and margin are not calibrated probabilities; an empty mask does not prove authenticity.")
     return "\n".join(lines)

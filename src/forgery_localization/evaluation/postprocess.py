@@ -86,12 +86,25 @@ def connected_regions(mask: np.ndarray, min_area: int = 1) -> list[dict]:
     return sorted(regions, key=lambda region: region["area_px"], reverse=True)
 
 
+def decision_margin(score: float, threshold: float) -> float:
+    """How far ``score`` lies from ``threshold``, rescaled to [0, 1].
+
+    Forged (score >= threshold): (score - threshold) / (1 - threshold).
+    Authentic: (threshold - score) / threshold. A raw score is misleading as a
+    confidence when the calibrated threshold is far from 0.5 (e.g. 0.02).
+    """
+    if score >= threshold:
+        span = 1.0 - threshold
+        return 1.0 if span <= 0 else float(min(1.0, (score - threshold) / span))
+    return 1.0 if threshold <= 0 else float(min(1.0, (threshold - score) / threshold))
+
+
 @dataclass
 class PredictionSummary:
     """Everything topic 2 asks the system to return for one image."""
 
     label: str                    # "Forged" or "Authentic"
-    confidence: float             # probability-like confidence in ``label``
+    confidence: float             # decision margin in [0, 1]: 0 at the threshold, 1 at score 0 or 1
     image_score: float            # manipulation score in [0, 1]
     score_method: str
     image_threshold: float
@@ -119,8 +132,8 @@ def summarize_prediction(probabilities: np.ndarray, *, pixel_threshold: float = 
     Regions smaller than ``min_region_fraction`` of the image are dropped from
     the box list (they still count in the area fraction). An image is
     reported as Forged when ``image_score >= image_threshold``. The confidence
-    is ``score`` for Forged and ``1 - score`` for Authentic; it is a ranking
-    score, not a calibrated probability.
+    is the distance from the threshold, rescaled to [0, 1] on the side of the
+    decision (see ``decision_margin``); it is not a calibrated probability.
     """
     probabilities = _check_probability_map(probabilities)
     for name, value in (("pixel_threshold", pixel_threshold), ("image_threshold", image_threshold)):
@@ -136,7 +149,7 @@ def summarize_prediction(probabilities: np.ndarray, *, pixel_threshold: float = 
     area_fraction = float(mask.mean())
     summary = PredictionSummary(
         label="Forged" if forged else "Authentic",
-        confidence=float(score if forged else 1 - score),
+        confidence=decision_margin(score, image_threshold),
         image_score=float(score),
         score_method=score_method,
         image_threshold=float(image_threshold),

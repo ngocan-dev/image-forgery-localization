@@ -53,7 +53,7 @@ def test_summary_forged_and_authentic():
 
     _, clean = summarize_prediction(np.full((50, 50), 0.1, np.float32), image_threshold=0.5)
     assert clean.label == "Authentic"
-    assert clean.confidence == pytest.approx(0.9)
+    assert clean.confidence == pytest.approx(0.8)   # (0.5 - 0.1) / 0.5
     assert clean.regions == []
 
 
@@ -61,6 +61,14 @@ def test_summary_accepts_external_score():
     probabilities = np.zeros((20, 20), np.float32)
     _, summary = summarize_prediction(probabilities, image_threshold=0.3, score=0.4)
     assert summary.label == "Forged" and summary.image_score == pytest.approx(0.4)
+    assert summary.confidence == pytest.approx(0.1 / 0.7)
+
+
+def test_decision_margin_low_threshold():
+    from forgery_localization.evaluation.postprocess import decision_margin
+    assert decision_margin(0.02, 0.02) == pytest.approx(0.0)
+    assert decision_margin(1.0, 0.02) == pytest.approx(1.0)
+    assert decision_margin(0.01, 0.02) == pytest.approx(0.5)   # authentic, halfway to 0
 
 
 def test_roc_auc_and_ties():
