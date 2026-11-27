@@ -7,9 +7,11 @@ coverage  COVERAGE copy-move dataset (Wen et al., 2016) laid out as
           (tampered) and ``<root>/mask/{n}forged.tif`` (tampered region).
 columbia  Columbia Uncompressed Image Splicing Detection dataset (Hsu & Chang,
           2006): ``4cam_auth/*.tif`` (authentic), ``4cam_splc/*.tif`` (spliced)
-          and ``*_edgemask.jpg`` colour masks. The spliced region is the
-          red-dominant area of the edge mask (``--columbia-region green`` flips
-          it); binary PNG masks are written to ``--mask-out-dir``.
+          and ``*_edgemask.jpg`` colour masks. Red marks the part from camera 1
+          (the host image), green the part from camera 2 (the pasted object), so
+          the spliced region is the GREEN area by default (checked on all 180
+          masks: green is the smaller region in 178). ``--columbia-region red``
+          flips it; binary PNG masks are written to ``--mask-out-dir``.
 imd2020   IMD2020 real-life manipulated images (Novozamsky et al., 2020): one folder
           per source photo holding ``{id}_orig.*`` (authentic), ``{id}_{k}.*``
           (manipulated) and ``{id}_{k}_mask.*`` (white = manipulated). Masks are
@@ -72,7 +74,7 @@ def coverage_rows(root: Path) -> tuple[list[dict], list[str]]:
     return rows, problems
 
 
-def columbia_mask(edgemask: Path, region: str = "red") -> np.ndarray:
+def columbia_mask(edgemask: Path, region: str = "green") -> np.ndarray:
     """Binary mask of the region whose colour dominates the Columbia edge mask."""
     with Image.open(edgemask) as image:
         rgb = np.asarray(image.convert("RGB"), dtype=np.int16)
@@ -262,8 +264,8 @@ def main(argv=None):
                                                "columbia: folder containing 4cam_auth/ and 4cam_splc/; "
                                                "imd2020: folder of per-photo sub-folders; "
                                                "nist16: NC2016_Test0613 folder")
-    parser.add_argument("--columbia-region", choices=("red", "green"), default="red",
-                        help="Colour of the spliced region in the Columbia edge masks")
+    parser.add_argument("--columbia-region", choices=("red", "green"), default="green",
+                        help="Colour of the spliced (pasted) region in the Columbia edge masks (green = camera 2)")
     parser.add_argument("--mask-out-dir", default=None,
                         help="columbia/imd2020/nist16: where binary PNG masks are written "
                              "(default: <preset>_masks next to --output)")

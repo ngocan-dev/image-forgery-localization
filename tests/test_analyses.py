@@ -96,14 +96,16 @@ def test_columbia_mask_and_rows(tmp_path):
     rgb_image().save(root / "4cam_auth" / "canong3_02_sub_01.tif")
     rgb_image().save(root / "4cam_splc" / "canong3_canonxt_sub_01.tif")
     edge = np.zeros((30, 40, 3), np.uint8)
-    edge[:, :20] = (0, 200, 0)               # authentic region (green)
-    edge[:, 20:] = (220, 10, 10)             # spliced region (red)
+    edge[:, :20] = (220, 10, 10)             # host image, camera 1 (red)
+    edge[:, 20:] = (0, 200, 0)               # pasted object, camera 2 (green)
     Image.fromarray(edge).save(root / "4cam_splc" / "edgemask" / "canong3_canonxt_sub_01_edgemask.png")
 
     mask = builder.columbia_mask(root / "4cam_splc" / "edgemask" / "canong3_canonxt_sub_01_edgemask.png")
     assert mask[:, 20:].all() and not mask[:, :20].any()
 
-    rows, problems = builder.columbia_rows(root, tmp_path / "masks", "red")
+    rows, problems = builder.columbia_rows(root, tmp_path / "masks", "green")
+    assert builder.columbia_mask(root / "4cam_splc" / "edgemask" / "canong3_canonxt_sub_01_edgemask.png",
+                                 "red")[:, :20].all()
     assert not problems
     assert [r["label"] for r in rows] == ["Au", "Tp"]
     saved = np.asarray(Image.open(rows[1]["mask_path"]))
