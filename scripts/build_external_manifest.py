@@ -10,6 +10,15 @@ columbia  Columbia Uncompressed Image Splicing Detection dataset (Hsu & Chang,
           and ``*_edgemask.jpg`` colour masks. The spliced region is the
           red-dominant area of the edge mask (``--columbia-region green`` flips
           it); binary PNG masks are written to ``--mask-out-dir``.
+imd2020   IMD2020 real-life manipulated images (Novozamsky et al., 2020): one folder
+          per source photo holding ``{id}_orig.*`` (authentic), ``{id}_{k}.*``
+          (manipulated) and ``{id}_{k}_mask.*`` (white = manipulated). Masks are
+          binarised at 127 and written as PNG to ``--mask-out-dir``.
+nist16    NIST Nimble 2016 (NC2016_Test0613). Rows come from a pipe-separated
+          reference CSV (``--nist-ref``, default the manipulation task) with
+          ProbeFileName / ProbeMaskFileName / IsTarget columns. NIST masks mark
+          the manipulated region in BLACK; they are inverted (``--nist-manipulated
+          white`` disables this) and written as binary PNG to ``--mask-out-dir``.
 generic   Any dataset with an authentic folder, a tampered folder and a mask
           folder; masks are found with ``--mask-pattern`` (``{stem}`` = image
           file name without extension), e.g. ``{stem}_gt.png``.
@@ -101,6 +110,93 @@ def columbia_rows(root: Path, mask_out: Path, region: str) -> tuple[list[dict], 
     return rows, problems
 
 
+def _save_binary(binary: np.ndarray, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(binary.astype(np.uint8) * 255).save(target)
+
+
+def _grey(path: Path) -> np.ndarray:
+    with Image.open(path) as image:
+        return np.asarray(image.convert("L"))
+
+
+def imd2020_rows(root: Path, mask_out: Path) -> tuple[list[dict], list[str]]:
+    rows, problems = [], []
+    folders = sorted(p for p in root.iterdir() if p.is_dir())
+    if not folders:
+        problems.append(f"Expected one sub-folder per source photo under {root}")
+    for folder in folders:
+        files = _images(folder)
+        masks = {p.stem[:-len("_mask")]: p for p in files if p.stem.endswith("_mask")}
+        group = f"imd2020_{folder.name}"
+        for path in files:
+            if path.stem.endswith("_mask"):
+                continue
+            if path.stem.endswith("_orig"):
+                rows.append({"image_path": path, "mask_path": "", "label": "Au", "source_group": group})
+                continue
+            source = masks.get(path.stem)
+            if source is None:
+                problems.append(f"No mask for {path.name}")
+                continue
+            binary = _grey(source) > 127
+            if not binary.any():
+                problems.append(f"Empty mask {source.name}: {path.name}")
+                continue
+            target = mask_out / f"{path.stem}_mask.png"
+            _save_binary(binary, target)
+            rows.append({"image_path": path, "mask_path": target, "label": "Tp", "source_group": group,
+                         "mask_source": "IMD2020 {id}_{k}_mask, binarised at 127"})
+    return rows, problems
+
+
+def _find(root: Path, relative: str) -> Path | None:
+    direct = root / relative
+    if direct.is_file():
+        return direct
+    matches = list(root.rglob(Path(relative).name))
+    return matches[0] if len(matches) == 1 else None
+
+
+def nist16_rows(root: Path, reference: Path, mask_out: Path,
+                manipulated: str = "black") -> tuple[list[dict], list[str]]:
+    rows, problems = [], []
+    if not reference.is_file():
+        return rows, [f"NIST reference CSV not found: {reference}"]
+    with reference.open(newline="", encoding="utf-8") as stream:
+        records = list(csv.DictReader(stream, delimiter="|"))
+    seen = set()
+    for record in records:
+        name = (record.get("ProbeFileName") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        path = _find(root, name)
+        if path is None:
+            problems.append(f"Probe not found: {name}")
+            continue
+        base = (record.get("BaseFileName") or "").strip()
+        group = f"nist16_{Path(base).stem if base else path.stem}"
+        if (record.get("IsTarget") or "").strip().upper() != "Y":
+            rows.append({"image_path": path, "mask_path": "", "label": "Au", "source_group": group})
+            continue
+        mask_name = (record.get("ProbeMaskFileName") or "").strip()
+        source = _find(root, mask_name) if mask_name else None
+        if source is None:
+            problems.append(f"No mask for {path.name}")
+            continue
+        grey = _grey(source)
+        binary = grey < 128 if manipulated == "black" else grey > 127
+        if not binary.any() or binary.all():
+            problems.append(f"Degenerate mask {source.name}: {path.name}")
+            continue
+        target = mask_out / f"{path.stem}_mask.png"
+        _save_binary(binary, target)
+        rows.append({"image_path": path, "mask_path": target, "label": "Tp", "source_group": group,
+                     "mask_source": f"NIST16 {reference.stem}, {manipulated} = manipulated"})
+    return rows, problems
+
+
 def generic_rows(authentic_dir: Path | None, tampered_dir: Path, mask_dir: Path, pattern: str,
                  group_regex: str | None, name: str) -> tuple[list[dict], list[str]]:
     rows, problems = [], []
@@ -161,13 +257,21 @@ def write_preview(rows: list[dict], path: Path, count: int, threshold: int | Non
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("preset", choices=("coverage", "columbia", "generic"))
+    parser.add_argument("preset", choices=("coverage", "columbia", "imd2020", "nist16", "generic"))
     parser.add_argument("--dataset-root", help="coverage: folder containing image/ and mask/; "
-                                               "columbia: folder containing 4cam_auth/ and 4cam_splc/")
+                                               "columbia: folder containing 4cam_auth/ and 4cam_splc/; "
+                                               "imd2020: folder of per-photo sub-folders; "
+                                               "nist16: NC2016_Test0613 folder")
     parser.add_argument("--columbia-region", choices=("red", "green"), default="red",
                         help="Colour of the spliced region in the Columbia edge masks")
     parser.add_argument("--mask-out-dir", default=None,
-                        help="columbia: where binary PNG masks are written (default: next to --output)")
+                        help="columbia/imd2020/nist16: where binary PNG masks are written "
+                             "(default: <preset>_masks next to --output)")
+    parser.add_argument("--nist-ref", default=None,
+                        help="nist16: reference CSV (default: "
+                             "<root>/reference/manipulation/NC2016-manipulation-ref.csv)")
+    parser.add_argument("--nist-manipulated", choices=("black", "white"), default="black",
+                        help="nist16: colour of the manipulated region in the original masks")
     parser.add_argument("--authentic-dir")
     parser.add_argument("--tampered-dir")
     parser.add_argument("--mask-dir")
@@ -183,15 +287,20 @@ def main(argv=None):
     parser.add_argument("--preview-count", type=int, default=12)
     args = parser.parse_args(argv)
 
+    if args.preset != "generic" and not args.dataset_root:
+        parser.error(f"{args.preset} requires --dataset-root")
+    mask_out = Path(args.mask_out_dir) if args.mask_out_dir else Path(args.output).parent / f"{args.preset}_masks"
     if args.preset == "coverage":
-        if not args.dataset_root:
-            parser.error("coverage requires --dataset-root")
         rows, problems = coverage_rows(Path(args.dataset_root))
     elif args.preset == "columbia":
-        if not args.dataset_root:
-            parser.error("columbia requires --dataset-root")
-        mask_out = Path(args.mask_out_dir) if args.mask_out_dir else Path(args.output).parent / "columbia_masks"
         rows, problems = columbia_rows(Path(args.dataset_root), mask_out, args.columbia_region)
+    elif args.preset == "imd2020":
+        rows, problems = imd2020_rows(Path(args.dataset_root), mask_out)
+    elif args.preset == "nist16":
+        root = Path(args.dataset_root)
+        reference = (Path(args.nist_ref) if args.nist_ref
+                     else root / "reference" / "manipulation" / "NC2016-manipulation-ref.csv")
+        rows, problems = nist16_rows(root, reference, mask_out, args.nist_manipulated)
     else:
         if not (args.tampered_dir and args.mask_dir):
             parser.error("generic requires --tampered-dir and --mask-dir")

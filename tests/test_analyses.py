@@ -108,3 +108,64 @@ def test_columbia_mask_and_rows(tmp_path):
     assert [r["label"] for r in rows] == ["Au", "Tp"]
     saved = np.asarray(Image.open(rows[1]["mask_path"]))
     assert saved.shape == (30, 40) and saved[:, 20:].min() == 255 and saved[:, :20].max() == 0
+
+
+def test_imd2020_rows(tmp_path):
+    builder = load_script("build_external_manifest")
+    folder = tmp_path / "imd2020" / "c8tf5mq"
+    folder.mkdir(parents=True)
+    rgb_image().save(folder / "c8tf5mq_orig.jpg")
+    rgb_image().save(folder / "c8tf5mq_0.png")
+    rgb_image().save(folder / "c8tf5mq_1.jpg")           # no mask -> skipped
+    mask = np.zeros((30, 40), np.uint8)
+    mask[5:15, 10:30] = 250                              # near-white, binarised at 127
+    Image.fromarray(mask).save(folder / "c8tf5mq_0_mask.png")
+
+    rows, problems = builder.imd2020_rows(tmp_path / "imd2020", tmp_path / "masks")
+    assert problems == ["No mask for c8tf5mq_1.jpg"]
+    assert sorted(r["label"] for r in rows) == ["Au", "Tp"]
+    assert {r["source_group"] for r in rows} == {"imd2020_c8tf5mq"}
+    tampered = next(r for r in rows if r["label"] == "Tp")
+    saved = np.asarray(Image.open(tampered["mask_path"]))
+    assert saved[5:15, 10:30].min() == 255 and saved.sum() == 255 * 10 * 20
+
+
+def test_nist16_rows_invert_black_masks(tmp_path):
+    builder = load_script("build_external_manifest")
+    root = tmp_path / "NC2016_Test0613"
+    (root / "probe").mkdir(parents=True)
+    (root / "mask").mkdir()
+    (root / "reference" / "manipulation").mkdir(parents=True)
+    rgb_image().save(root / "probe" / "NC2016_0001.jpg")
+    rgb_image().save(root / "probe" / "NC2016_0002.jpg")
+    nist_mask = np.full((30, 40), 255, np.uint8)
+    nist_mask[:, :10] = 0                                # black = manipulated in NIST
+    Image.fromarray(nist_mask).save(root / "mask" / "NC2016_0001.png")
+    reference = root / "reference" / "manipulation" / "NC2016-manipulation-ref.csv"
+    reference.write_text(
+        "TaskID|ProbeFileID|ProbeFileName|ProbeMaskFileName|BaseFileName|IsTarget\n"
+        "manipulation|NC2016_0001|probe/NC2016_0001.jpg|mask/NC2016_0001.png|world/base_7.jpg|Y\n"
+        "manipulation|NC2016_0002|probe/NC2016_0002.jpg||base_7.jpg|N\n", encoding="utf-8")
+
+    rows, problems = builder.nist16_rows(root, reference, tmp_path / "masks")
+    assert not problems
+    assert [r["label"] for r in rows] == ["Tp", "Au"]
+    assert {r["source_group"] for r in rows} == {"nist16_base_7"}
+    saved = np.asarray(Image.open(rows[0]["mask_path"]))
+    assert saved[:, :10].min() == 255 and saved[:, 10:].max() == 0
+
+
+def test_build_manifest_cli_nist16(tmp_path):
+    builder = load_script("build_external_manifest")
+    root = tmp_path / "nist"
+    (root / "probe").mkdir(parents=True)
+    rgb_image().save(root / "probe" / "a.jpg")
+    ref = tmp_path / "ref.csv"
+    ref.write_text("ProbeFileName|ProbeMaskFileName|IsTarget\nprobe/a.jpg||N\n", encoding="utf-8")
+    output = tmp_path / "out" / "nist16_test.csv"
+    builder.main(["nist16", "--dataset-root", str(root), "--nist-ref", str(ref), "--output", str(output)])
+    with output.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 1 and rows[0]["label"] == "Au" and rows[0]["mask_path"] == ""
+    with pytest.raises(SystemExit):
+        builder.main(["imd2020", "--output", str(output)])
