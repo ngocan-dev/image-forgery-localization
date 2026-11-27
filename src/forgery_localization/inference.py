@@ -4,7 +4,8 @@ Pipeline (identical preprocessing to training):
 
     image -> RGB, resize 256x256 bilinear, /255 -> FeatureBuilder(mode)
           -> model -> logits -> sigmoid (256x256 probability map)
-          -> image score at model resolution -> Real/Fake
+          -> image score at model resolution (or the image-level head's
+             probability, score method ``cls``) -> Real/Fake
           -> probability map resized bilinearly to the original size
           -> threshold -> mask, connected regions (boxes), area fraction
 """
@@ -23,7 +24,9 @@ from forgery_localization.evaluation.postprocess import (
     PredictionSummary, image_score, summarize_prediction,
 )
 from forgery_localization.features import FeatureBuilder
-from forgery_localization.models.factory import load_checkpoint
+from forgery_localization.models.factory import load_checkpoint, model_label, split_outputs
+
+CLS_SCORE = "cls"   # score method: probability of the image-level classification head
 
 DEFAULT_THRESHOLDS = {
     "pixel_threshold": 0.5,
@@ -65,25 +68,39 @@ class Predictor:
         self.features = FeatureBuilder(self.config["mode"])
         self.size = tuple(self.config.get("image_size", (256, 256)))
         self.thresholds = dict(DEFAULT_THRESHOLDS, **(thresholds or {}))
+        if self.thresholds["score_method"] == CLS_SCORE and not self.has_cls_head:
+            raise ValueError("Score method 'cls' needs a checkpoint trained with --cls-head")
 
     @property
     def name(self) -> str:
-        return f"{self.config['architecture']} | {self.config['mode']} | seed {self.config.get('seed')}"
+        return f"{model_label(self.config)} | {self.config['mode']} | seed {self.config.get('seed')}"
+
+    @property
+    def has_cls_head(self) -> bool:
+        return bool(self.config.get("cls_head", False))
 
     @torch.inference_mode()
+    def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """(B, 3, H, W) images in [0, 1] -> ((B, 1, H, W) pixel probabilities, (B,) head probabilities or None)."""
+        inputs = torch.stack([self.features(image) for image in images.cpu()])
+        logits, cls_logits = split_outputs(self.model(inputs.to(self.device)))
+        cls = None if cls_logits is None else cls_logits.float().sigmoid()[:, 0].cpu()
+        return logits.float().sigmoid().cpu(), cls
+
     def probabilities_from_tensors(self, images: torch.Tensor) -> torch.Tensor:
         """(B, 3, H, W) images in [0, 1] -> (B, 1, H, W) probabilities."""
-        inputs = torch.stack([self.features(image) for image in images.cpu()])
-        logits = self.model(inputs.to(self.device))
-        return logits.float().sigmoid().cpu()
+        return self.forward(images)[0]
 
     def predict(self, image: Image.Image) -> tuple[np.ndarray, np.ndarray, PredictionSummary]:
         """Return (probability map, binary mask, summary) at the ORIGINAL image size."""
         image = ImageOps.exif_transpose(image).convert("RGB")
         tensor = image_to_tensor(image, self.size)
-        probabilities = self.probabilities_from_tensors(tensor.unsqueeze(0))
+        probabilities, cls = self.forward(tensor.unsqueeze(0))
         t = self.thresholds
-        score = image_score(probabilities[0, 0].numpy(), t["score_method"], t["pixel_threshold"])
+        if t["score_method"] == CLS_SCORE:
+            score = float(cls[0])
+        else:
+            score = image_score(probabilities[0, 0].numpy(), t["score_method"], t["pixel_threshold"])
         full = F.interpolate(probabilities, size=(image.height, image.width), mode="bilinear",
                              align_corners=False)[0, 0].clamp(0, 1).numpy()
         mask, summary = summarize_prediction(

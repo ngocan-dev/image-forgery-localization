@@ -13,6 +13,24 @@ Dice@0.5 with lower validation loss as tie-break. The test set is never read.
 
 Output: ``<output-root>/<architecture>_<mode>_seed<seed>/`` with config.json,
 last.pt (resumable), best_dice.pt, history.csv, validation_thresholds.csv.
+
+Phase-2 options (all off by default, so the default command still reproduces
+controlled_multiseed_v1 bit for bit; any of them switches the protocol name to
+topic2_v2 and should be combined with ``--variant`` and a new ``--output-root``):
+
+``--robust-augment P``   random JPEG / resize / noise / blur chain on a fraction
+                         P of training images (applied at full resolution,
+                         before the 256x256 resize, like the robustness test);
+``--cls-head``           image-level Real/Fake head trained jointly with the mask
+                         (``--cls-weight`` scales its BCE loss);
+``--seg-loss``           ``bce_dice`` (default), ``focal_dice`` or ``bce_tversky``
+                         (Tversky alpha 0.3 / beta 0.7 penalises missed pixels
+                         more than false alarms, against empty predictions).
+
+    python scripts/train_multiinput.py --architecture segformer_mit_b2 --mode noise --seed 7 \
+        --train-manifest train.csv --val-manifest val.csv --root / --variant v2 \
+        --robust-augment 0.5 --cls-head --seg-loss bce_tversky \
+        --output-root /content/drive/MyDrive/ImageForgeryResearch/checkpoints/topic2_v2_10ep
 """
 
 from __future__ import annotations
@@ -28,10 +46,15 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from forgery_localization.datasets.casia_dataset import CASIADataset, validate_split_isolation
+from forgery_localization.evaluation.image_metrics import roc_auc
 from forgery_localization.features import MODES, FeatureBuilder, input_channels
-from forgery_localization.models.factory import ARCHITECTURES, build_model
+from forgery_localization.models.factory import ARCHITECTURES, build_model, split_outputs
+from forgery_localization.perturbations import RandomDegradation
 
 THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5]
+SEG_LOSSES = ("bce_dice", "focal_dice", "bce_tversky")
+FOCAL_GAMMA, FOCAL_ALPHA = 2.0, 0.75
+TVERSKY_ALPHA, TVERSKY_BETA = 0.3, 0.7   # weights of false positives / false negatives
 
 
 def derived_seed(*parts) -> int:
@@ -51,6 +74,8 @@ class MultiInputDataset(Dataset):
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
+        if hasattr(self.base.perturbation, "set_epoch"):
+            self.base.perturbation.set_epoch(epoch)
 
     def __getitem__(self, index):
         image, mask = self.base[index]
@@ -64,22 +89,42 @@ class MultiInputDataset(Dataset):
         return self.features(image), mask.float().contiguous()
 
 
-def loss_fn(logits, masks, pos_weight: float):
+def loss_fn(logits, masks, pos_weight: float, seg_loss: str = "bce_dice", cls_logits=None,
+            cls_weight: float = 0.5):
+    """Segmentation loss (float32) plus, with a classification head, ``cls_weight`` x image BCE."""
     logits, masks = logits.float(), masks.float()
-    bce = F.binary_cross_entropy_with_logits(logits, masks, pos_weight=logits.new_tensor([pos_weight]))
     probabilities = logits.sigmoid()
+    if seg_loss == "focal_dice":
+        bce_map = F.binary_cross_entropy_with_logits(logits, masks, reduction="none")
+        p_true = probabilities * masks + (1 - probabilities) * (1 - masks)
+        alpha = FOCAL_ALPHA * masks + (1 - FOCAL_ALPHA) * (1 - masks)
+        pixel_loss = (alpha * (1 - p_true).pow(FOCAL_GAMMA) * bce_map).mean()
+    else:
+        pixel_loss = F.binary_cross_entropy_with_logits(logits, masks, pos_weight=logits.new_tensor([pos_weight]))
     intersection = (probabilities * masks).sum()
-    dice_loss = 1 - (2 * intersection + 1) / (probabilities.sum() + masks.sum() + 1)
-    return bce + dice_loss
+    if seg_loss == "bce_tversky":
+        false_positive = (probabilities * (1 - masks)).sum()
+        false_negative = ((1 - probabilities) * masks).sum()
+        region_loss = 1 - (intersection + 1) / (intersection + TVERSKY_ALPHA * false_positive
+                                                + TVERSKY_BETA * false_negative + 1)
+    else:
+        region_loss = 1 - (2 * intersection + 1) / (probabilities.sum() + masks.sum() + 1)
+    loss = pixel_loss + region_loss
+    if cls_logits is not None:
+        labels = masks.flatten(1).amax(1, keepdim=True)          # 1 = tampered image
+        loss = loss + cls_weight * F.binary_cross_entropy_with_logits(cls_logits.float(), labels)
+    return loss
 
 
-def run_epoch(model, loader, records, device, pos_weight, optimizer=None, scaler=None):
+def run_epoch(model, loader, records, device, pos_weight, optimizer=None, scaler=None,
+              seg_loss="bce_dice", cls_weight=0.5):
     training = optimizer is not None
     model.train(training)
     thresholds = [0.5] if training else THRESHOLDS
     stats = {t: dict(tp=0, fp=0, fn=0, dice_sum=0.0, n_tampered=0, auth_fp=0, auth_pixels=0)
              for t in thresholds}
     total_loss, count = 0.0, 0
+    cls_scores, cls_labels = [], []
     context = torch.enable_grad() if training else torch.inference_mode()
     with context:
         for images, masks in loader:
@@ -88,8 +133,8 @@ def run_epoch(model, loader, records, device, pos_weight, optimizer=None, scaler
             if training:
                 optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device.type, dtype=torch.float16, enabled=device.type == "cuda"):
-                logits = model(images)
-                loss = loss_fn(logits, masks, pos_weight)
+                logits, cls_logits = split_outputs(model(images))
+                loss = loss_fn(logits, masks, pos_weight, seg_loss, cls_logits, cls_weight)
             if not torch.isfinite(loss).item():
                 raise RuntimeError("Loss NaN/Inf; epoch not saved.")
             if training:
@@ -104,6 +149,9 @@ def run_epoch(model, loader, records, device, pos_weight, optimizer=None, scaler
                     expected = torch.tensor([r["label"] == "tampered" for r in records[count:count + len(images)]],
                                             device=device)
                     assert torch.equal(tampered, expected), "Validation label/mask mismatch"
+                    if cls_logits is not None:
+                        cls_scores += cls_logits.float().sigmoid()[:, 0].tolist()
+                        cls_labels += tampered.tolist()
                 for threshold, s in stats.items():
                     predicted = probabilities >= threshold
                     tp = (predicted & target).sum((1, 2, 3))
@@ -129,6 +177,8 @@ def run_epoch(model, loader, records, device, pos_weight, optimizer=None, scaler
         if not training:
             row["mean_tampered_dice"] = s["dice_sum"] / max(s["n_tampered"], 1)
             row["authentic_fp_pixel_pct"] = 100 * s["auth_fp"] / max(s["auth_pixels"], 1)
+            if cls_scores:
+                row["cls_auc"] = roc_auc(cls_scores, cls_labels)
         rows.append(row)
     return total_loss / count, rows
 
@@ -170,14 +220,34 @@ def main(argv=None):
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--pos-weight", type=float, default=3.0)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--variant", default=None,
+                        help="Short tag for a phase-2 configuration (e.g. v2); appended to the model name in reports")
+    parser.add_argument("--robust-augment", type=float, default=0.0, metavar="P",
+                        help="Fraction of training images given a random JPEG/resize/noise/blur chain (0 = off)")
+    parser.add_argument("--cls-head", action="store_true", help="Add an image-level Real/Fake head")
+    parser.add_argument("--cls-weight", type=float, default=0.5, help="Weight of the image-level BCE loss")
+    parser.add_argument("--seg-loss", choices=SEG_LOSSES, default="bce_dice")
     args = parser.parse_args(argv)
+    if not 0 <= args.robust_augment <= 1:
+        parser.error("--robust-augment must be within [0, 1]")
+    phase2 = {}
+    if args.robust_augment > 0:
+        phase2["robust_augment"] = args.robust_augment
+    if args.cls_head:
+        phase2.update(cls_head=True, cls_weight=args.cls_weight)
+    if args.seg_loss != "bce_dice":
+        phase2["seg_loss"] = args.seg_loss
+    if phase2 and not args.variant:
+        parser.error("phase-2 options need --variant (e.g. v2) so their results are reported separately")
 
     if not torch.cuda.is_available():
         raise SystemExit("A CUDA GPU is required (the protocol uses fp16 autocast).")
     device = torch.device("cuda")
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    train_base = CASIADataset(args.train_manifest, root=args.root, image_size=(256, 256))
+    degradation = RandomDegradation(args.seed, args.robust_augment) if args.robust_augment > 0 else None
+    train_base = CASIADataset(args.train_manifest, root=args.root, image_size=(256, 256),
+                              perturbation=degradation)
     val_base = CASIADataset(args.val_manifest, root=args.root, image_size=(256, 256))
     validate_split_isolation(train_base, val_base)
 
@@ -207,6 +277,16 @@ def main(argv=None):
         "torch_version": str(torch.__version__),
         "smp_version": str(smp.__version__),
     }
+    if phase2 or args.variant:
+        # Keys exist only for phase-2 runs: default commands keep the v1 config.json unchanged.
+        config.update(protocol="topic2_v2", variant=args.variant, **phase2)
+        if args.robust_augment > 0:
+            config["augmentation"] += f"+random_degradation_p{args.robust_augment}"
+        if "seg_loss" in phase2:
+            config["loss"] = {"focal_dice": "focal_g2_a0.75_plus_batch_dice_float32",
+                              "bce_tversky": "weighted_bce_plus_batch_tversky_a0.3_b0.7_float32"}[args.seg_loss]
+        if args.cls_head:
+            config["loss"] += f"+{args.cls_weight}x_image_bce"
     directory = Path(args.output_root) / f"{args.architecture}_{args.mode}_seed{args.seed}"
     directory.mkdir(parents=True, exist_ok=True)
     config_path, last_path = directory / "config.json", directory / "last.pt"
@@ -222,7 +302,8 @@ def main(argv=None):
     if saved is not None and saved["epoch"] >= args.epochs:
         print(f"SKIP {directory.name}: already complete")
         return
-    model = build_model(args.architecture, args.mode, pretrained=saved is None, seed=args.seed).to(device)
+    model = build_model(args.architecture, args.mode, pretrained=saved is None, seed=args.seed,
+                        cls_head=args.cls_head).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler("cuda")
     train_data = MultiInputDataset(train_base, args.mode, args.seed, augment=True)
@@ -256,8 +337,10 @@ def main(argv=None):
     for epoch in range(start_epoch, args.epochs + 1):
         train_data.set_epoch(epoch)
         shuffle_generator.manual_seed(derived_seed("shuffle", args.seed, epoch))
-        train_loss, train_rows = run_epoch(model, train_loader, None, device, args.pos_weight, optimizer, scaler)
-        val_loss, val_rows = run_epoch(model, val_loader, val_base.records, device, args.pos_weight)
+        train_loss, train_rows = run_epoch(model, train_loader, None, device, args.pos_weight, optimizer, scaler,
+                                           args.seg_loss, args.cls_weight)
+        val_loss, val_rows = run_epoch(model, val_loader, val_base.records, device, args.pos_weight,
+                                       seg_loss=args.seg_loss, cls_weight=args.cls_weight)
         val05 = next(row for row in val_rows if row["threshold"] == 0.5)
         score = val05["micro_dice"]
         if score > state["best_dice"] or (score == state["best_dice"] and val_loss < state["best_loss_at_dice"]):
@@ -276,7 +359,8 @@ def main(argv=None):
         print(f"{directory.name} | Epoch {epoch:02d}/{args.epochs} | Train loss {train_loss:.4f} | "
               f"Val loss {val_loss:.4f} | Dice@0.5 {score:.4f} | "
               f"Mean tampered Dice {val05['mean_tampered_dice']:.4f} | "
-              f"Authentic FP px {val05['authentic_fp_pixel_pct']:.2f}%", flush=True)
+              f"Authentic FP px {val05['authentic_fp_pixel_pct']:.2f}%"
+              + (f" | Image AUC (head) {val05['cls_auc']:.4f}" if "cls_auc" in val05 else ""), flush=True)
     print(f"DONE {directory.name}: best epoch {state['best_epoch']}, Dice {state['best_dice']:.6f}")
 
 

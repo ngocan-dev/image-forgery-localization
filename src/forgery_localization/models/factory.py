@@ -11,6 +11,14 @@ Supported architectures
 For 6-channel inputs the first convolution keeps its pretrained RGB weights
 and the three extra channels start at zero ("rgb_pretrained_extra_zero"), so
 at initialisation the model behaves exactly like its RGB counterpart.
+
+With ``cls_head=True`` an image-level classification head (smp
+``ClassificationHead``: global average pooling + dropout + linear on the
+deepest encoder feature) is attached AFTER smp has initialised the model, so
+the encoder/decoder start from exactly the same weights as the run without a
+head (passing ``aux_params`` would draw the head first and shift the decoder
+initialisation). The model then returns ``(mask_logits, image_logits)``; use
+``split_outputs`` to handle both kinds of model uniformly.
 """
 
 from __future__ import annotations
@@ -75,9 +83,26 @@ def expand_input_channels(model: nn.Module, channels: int) -> None:
         model.encoder._out_channels = tuple(out)
 
 
+CLS_HEAD_PARAMS = {"classes": 1, "pooling": "avg", "dropout": 0.2}
+
+
+def split_outputs(output) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """``(mask_logits (B,1,H,W), image_logits (B,1) or None)`` for any model built here."""
+    if isinstance(output, (tuple, list)):
+        return output[0], output[1]
+    return output, None
+
+
+def model_label(config: dict) -> str:
+    """Architecture name used in reports; a training variant (e.g. v2) is appended."""
+    architecture = config.get("architecture") or architecture_from_config(config)
+    variant = config.get("variant")
+    return f"{architecture}-{variant}" if variant else architecture
+
+
 def build_model(architecture: str, mode: str, pretrained: bool = True,
-                seed: int | None = None) -> nn.Module:
-    """Return a model emitting (B, 1, H, W) logits for the given feature mode."""
+                seed: int | None = None, cls_head: bool = False) -> nn.Module:
+    """Return a model emitting (B, 1, H, W) logits (plus (B, 1) image logits with ``cls_head``)."""
     if architecture not in ARCHITECTURES:
         raise ValueError(f"architecture must be one of {sorted(ARCHITECTURES)}")
     smp = _smp()
@@ -94,6 +119,13 @@ def build_model(architecture: str, mode: str, pretrained: bool = True,
         activation=None,
     )
     expand_input_channels(model, input_channels(mode))
+    if cls_head:
+        from segmentation_models_pytorch.base import ClassificationHead
+        from segmentation_models_pytorch.base.initialization import initialize_head
+        with torch.random.fork_rng(devices=[]):   # leave the caller's RNG stream untouched
+            head = ClassificationHead(in_channels=model.encoder.out_channels[-1], **CLS_HEAD_PARAMS)
+            initialize_head(head)
+        model.classification_head = head          # smp's forward then returns (masks, labels)
     return model
 
 
@@ -114,7 +146,8 @@ def load_checkpoint(path: str | Path, device: str | torch.device = "cpu"
         raise ValueError(f"{path} is not a best_dice.pt checkpoint with config and model")
     config = dict(payload["config"])
     config.setdefault("architecture", architecture_from_config(config))
-    model = build_model(config["architecture"], config["mode"], pretrained=False)
+    model = build_model(config["architecture"], config["mode"], pretrained=False,
+                        cls_head=bool(config.get("cls_head", False)))
     model.load_state_dict(payload["model"], strict=True)
     model.to(device).eval()
     config["checkpoint_epoch"] = payload.get("epoch")

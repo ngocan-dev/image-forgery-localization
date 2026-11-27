@@ -36,7 +36,8 @@ from forgery_localization.evaluation.image_metrics import (
     choose_threshold, classification_metrics, pixel_summary,
 )
 from forgery_localization.evaluation.postprocess import SCORE_METHODS, image_score
-from forgery_localization.inference import Predictor, render_overlay
+from forgery_localization.inference import CLS_SCORE, Predictor, render_overlay
+from forgery_localization.models.factory import model_label
 from forgery_localization.perturbations import parse_perturbation
 
 
@@ -51,7 +52,9 @@ def parse_args(argv=None):
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--pixel-threshold", type=float, default=0.5)
-    parser.add_argument("--score-method", choices=SCORE_METHODS, default="top1pct_mean")
+    parser.add_argument("--score-method", choices=("auto", CLS_SCORE, *SCORE_METHODS), default="auto",
+                        help="Image score for Real/Fake; auto = 'cls' (classification head) when the "
+                             "checkpoint has one, otherwise top1pct_mean")
     parser.add_argument("--calibrate", action="store_true",
                         help="Choose the image threshold on THIS manifest (use only for validation)")
     parser.add_argument("--criterion", choices=("f1", "balanced_accuracy"), default="f1")
@@ -67,7 +70,15 @@ def parse_args(argv=None):
 
 
 def run_name(config: dict) -> str:
-    return f"{config['architecture']}_{config['mode']}_seed{config.get('seed', 'na')}"
+    return f"{model_label(config)}_{config['mode']}_seed{config.get('seed', 'na')}"
+
+
+def resolve_score_method(requested: str, has_cls_head: bool) -> str:
+    if requested == "auto":
+        return CLS_SCORE if has_cls_head else "top1pct_mean"
+    if requested == CLS_SCORE and not has_cls_head:
+        raise SystemExit("--score-method cls needs a checkpoint trained with --cls-head")
+    return requested
 
 
 def collect_predictions(predictor: Predictor, dataset: CASIADataset, batch_size: int,
@@ -75,9 +86,11 @@ def collect_predictions(predictor: Predictor, dataset: CASIADataset, batch_size:
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2)
     rows, probability_maps, index = [], {}, 0
     for images, masks in loader:
-        probabilities = predictor.probabilities_from_tensors(images)[:, 0].numpy()
+        probabilities, cls = predictor.forward(images)
+        probabilities = probabilities[:, 0].numpy()
+        cls = [None] * len(probabilities) if cls is None else cls.tolist()
         truth = masks[:, 0].numpy() >= 0.5
-        for probability, target in zip(probabilities, truth):
+        for probability, target, cls_score in zip(probabilities, truth, cls):
             record = dataset.records[index]
             predicted = probability >= pixel_threshold
             tp = int((predicted & target).sum())
@@ -98,6 +111,7 @@ def collect_predictions(predictor: Predictor, dataset: CASIADataset, batch_size:
                 "gt_area_pct": 100 * float(target.mean()),
                 "pred_area_pct": 100 * float(predicted.mean()),
                 **{f"score_{m}": image_score(probability, m, pixel_threshold) for m in SCORE_METHODS},
+                **({} if cls_score is None else {f"score_{CLS_SCORE}": cls_score}),
             })
             probability_maps[index] = probability
             index += 1
@@ -166,15 +180,16 @@ def main(argv=None) -> None:
         thresholds_path = Path(args.thresholds_file) if args.thresholds_file else checkpoint.parent / "thresholds.json"
         predictor = Predictor(checkpoint, device=args.device)
         name = run_name(predictor.config)
-        print(f"\n== {name} on {args.dataset_name} ({len(dataset)} images)")
+        score_method = resolve_score_method(args.score_method, predictor.has_cls_head)
+        print(f"\n== {name} on {args.dataset_name} ({len(dataset)} images, image score: {score_method})")
         rows, probability_maps = collect_predictions(predictor, dataset, args.batch_size, args.pixel_threshold)
         labels = [row["forged"] for row in rows]
-        scores = [row[f"score_{args.score_method}"] for row in rows]
+        scores = [row[f"score_{score_method}"] for row in rows]
 
         if args.calibrate:
             threshold = choose_threshold(scores, labels, args.criterion)
             thresholds = {"pixel_threshold": args.pixel_threshold, "image_threshold": threshold,
-                          "score_method": args.score_method, "criterion": args.criterion,
+                          "score_method": score_method, "criterion": args.criterion,
                           "calibrated_on": args.dataset_name}
             thresholds_path.write_text(json.dumps(thresholds, indent=2), encoding="utf-8")
             print("Saved thresholds:", thresholds_path)
@@ -182,20 +197,20 @@ def main(argv=None) -> None:
             if not thresholds_path.is_file():
                 raise SystemExit(f"Missing {thresholds_path}; run --calibrate on validation first.")
             thresholds = json.loads(thresholds_path.read_text(encoding="utf-8"))
-            if thresholds["score_method"] != args.score_method or thresholds["pixel_threshold"] != args.pixel_threshold:
+            if thresholds["score_method"] != score_method or thresholds["pixel_threshold"] != args.pixel_threshold:
                 raise SystemExit("Thresholds file was calibrated with a different score method/pixel threshold")
 
         image_level = classification_metrics(scores, labels, thresholds["image_threshold"])
         for row, score in zip(rows, scores):
             row["predicted_label"] = "tampered" if score >= thresholds["image_threshold"] else "authentic"
         auc_by_method = {}
-        for method in SCORE_METHODS:
+        for method in SCORE_METHODS + ((CLS_SCORE,) if predictor.has_cls_head else ()):
             method_scores = [row[f"score_{method}"] for row in rows]
             auc_by_method[method] = classification_metrics(method_scores, labels, 0.5)["auc"]
         summary = {
             "run": name,
             "dataset": args.dataset_name,
-            "architecture": predictor.config["architecture"],
+            "architecture": model_label(predictor.config),
             "mode": predictor.config["mode"],
             "seed": predictor.config.get("seed"),
             "checkpoint": str(checkpoint),

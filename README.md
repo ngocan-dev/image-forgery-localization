@@ -15,6 +15,7 @@ A pre-thesis research project using PyTorch, U-Net and CASIA v2 to predict where
 | IoU / Dice / Pixel-F1; Acc / P / R / F1 / AUC, confusion matrix | `scripts/evaluate.py`, `evaluation/image_metrics.py` |
 | Multi-dataset evaluation | `scripts/build_external_manifest.py` (Coverage, Columbia, IMD2020 and NIST16 presets, generic folders) |
 | Robustness (JPEG, resize, noise, blur) | `perturbations.py`, `scripts/evaluate.py --perturb jpeg:70` |
+| Phase 2: robust training, Real/Fake head, Tversky loss | `train_multiinput.py --variant v2 --robust-augment 0.5 --cls-head --seg-loss bce_tversky`; notebook `RUN_PHASE2`; evaluated with the head's score (`--score-method auto`) |
 | Choice of the Real/Fake score | `scripts/score_study.py` (per-method thresholds and selection on validation only) |
 | Mean ± SD over seeds, generalization matrix | `scripts/summarize_results.py` |
 | Web demo | `app/demo.py` (Gradio), CLI `scripts/predict.py` |

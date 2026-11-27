@@ -171,3 +171,28 @@ def test_build_manifest_cli_nist16(tmp_path):
     assert len(rows) == 1 and rows[0]["label"] == "Au" and rows[0]["mask_path"] == ""
     with pytest.raises(SystemExit):
         builder.main(["imd2020", "--output", str(output)])
+
+
+def test_random_degradation_is_deterministic_and_keeps_size():
+    from forgery_localization.perturbations import RandomDegradation
+    image = rgb_image(64, 48)
+    always = RandomDegradation(seed=7, probability=1.0)
+    first = always.specs("a.jpg")
+    assert first and first == always.specs("a.jpg")
+    assert all(spec.split(":")[0] in RandomDegradation.KINDS for spec in first)
+    assert all(not s.startswith("jpeg") for s in first[:-1])          # JPEG, if any, is applied last
+    out = always(image, "a.jpg")
+    assert out.size == image.size
+    assert np.array_equal(np.asarray(out), np.asarray(always(image, "a.jpg")))
+    choices = set()
+    for epoch in range(1, 30):
+        always.set_epoch(epoch)
+        choices.add(tuple(always.specs("a.jpg")))
+    assert len(choices) > 5                                         # a new draw every epoch
+    never = RandomDegradation(seed=7, probability=0.0)
+    assert never.specs("a.jpg") == [] and never(image, "a.jpg") is image
+    half = RandomDegradation(seed=1, probability=0.5)
+    share = np.mean([bool(half.specs(f"{i}.png")) for i in range(400)])
+    assert 0.4 < share < 0.6
+    with pytest.raises(ValueError):
+        RandomDegradation(seed=0, probability=1.5)
