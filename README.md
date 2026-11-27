@@ -94,7 +94,7 @@ python -m pytest
 
 Alternatively, `python -m pip install -e ".[dev]"` installs the same development environment. `python -m pip install -e .` omits pytest. The `src/` layout relies on an installed package for future scripts; use absolute imports such as `from forgery_localization.models import unet`. Pytest also has a local `src` path configured for scaffold smoke tests.
 
-PyTorch, NumPy, Pillow, headless OpenCV, Matplotlib, scikit-learn and PyYAML are runtime dependencies. Headless OpenCV provides `cv2` without desktop GUI requirements, making it suitable for notebooks and servers. Dependency ranges are compatibility constraints, not a reproducible lockfile; record resolved versions with future experiments.
+PyTorch, NumPy, Pillow, Matplotlib, PyYAML and segmentation-models-pytorch are runtime dependencies. Dependency ranges are compatibility constraints, not a reproducible lockfile; record resolved versions with future experiments.
 
 For a local GPU, install a PyTorch build matching your GPU driver and CUDA environment, then install this package. `device: auto` selects CUDA if available and CPU otherwise; explicit `cpu` and `cuda` settings are supported.
 
@@ -102,9 +102,9 @@ For Google Colab, place or clone this repository into the runtime, check `!pytho
 
 ### Python 3.13 and Colab compatibility review
 
-The declared Python range remains `>=3.11,<3.12`; it has **not** been widened. Local tests run on Python 3.14 CPU are evidence for that test environment only, not validation of Python 3.13, Colab GPU execution or every optional analysis dependency. Python 3.13 and CUDA were unavailable locally during this review. The local environment passed `pip check` for its installed packages, but OpenCV and scikit-learn were not installed; full dependency-set compatibility is therefore unverified.
+The declared Python range remains `>=3.11,<3.12`; it has **not** been widened. Local tests run on Python 3.14 CPU are evidence for that test environment only, not validation of Python 3.13, Colab GPU execution or every optional analysis dependency. Python 3.13 and CUDA were unavailable locally during this review.
 
-Colab now lists Python 3.13 runtimes in its [official runtime documentation](https://research.google.com/colaboratory/runtime-version-faq.html). Check your actual runtime instead of assuming its version. Modern PyTorch releases support Python 3.13 according to the [official release compatibility matrix](https://github.com/pytorch/pytorch/blob/main/RELEASE.md), but the project's lower bounds are not a tested Python 3.13 dependency lock. PyTorch availability alone does not validate NumPy, Pillow, OpenCV, Matplotlib, scikit-learn, PyYAML and pytest together.
+Colab now lists Python 3.13 runtimes in its [official runtime documentation](https://research.google.com/colaboratory/runtime-version-faq.html). Check your actual runtime instead of assuming its version. Modern PyTorch releases support Python 3.13 according to the [official release compatibility matrix](https://github.com/pytorch/pytorch/blob/main/RELEASE.md), but the project's lower bounds are not a tested Python 3.13 dependency lock. PyTorch availability alone does not validate NumPy, Pillow, Matplotlib, PyYAML and pytest together.
 
 For a compatibility investigation on Colab, record `sys.version`, `torch.__version__`, `torch.version.cuda` and `torch.cuda.is_available()`. Resolve the canonical `pyproject.toml` dependencies for that interpreter, preserve a compatible GPU PyTorch build, run `python -m pip check`, import every dependency, and run the full test suite plus a CUDA synthetic training/checkpoint smoke test. Save exact resolved package versions. A successful dependency resolver or source-layout pytest run alone is not permission to widen the package's Python constraints. Ordinary editable installation on Python 3.13 currently fails the declared Python requirement by design; prefer a compatible Python 3.11 environment for supported installation.
 

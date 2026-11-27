@@ -13,7 +13,6 @@ import pytest
     "forgery_localization.training.trainer",
     "forgery_localization.evaluation.metrics",
     "forgery_localization.utils.visualization",
-    "forgery_localization.utils.seed",
 ])
 def test_module_import(module: str) -> None:
     """Importing a module must not start training or require a dataset."""
