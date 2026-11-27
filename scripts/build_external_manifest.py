@@ -25,6 +25,10 @@ generic   Any dataset with an authentic folder, a tampered folder and a mask
           folder; masks are found with ``--mask-pattern`` (``{stem}`` = image
           file name without extension), e.g. ``{stem}_gt.png``.
 
+Exact duplicates (same decoded pixels, e.g. one IMD2020 photo posted in two
+threads) are kept once: the first row wins and later copies are reported as
+SKIPPED, so no image is counted twice and the loader's duplicate check passes.
+
 Masks are only marked ``mask_verified=true`` when ``--masks-checked`` is given.
 Run once without it, open the preview image, confirm that WHITE = manipulated
 region and that masks align with the images, then rerun with --masks-checked.
@@ -38,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 from pathlib import Path
 import re
 
@@ -223,6 +228,27 @@ def generic_rows(authentic_dir: Path | None, tampered_dir: Path, mask_dir: Path,
     return rows, problems
 
 
+def content_hash(path: Path) -> str:
+    """Same decoded-pixel hash as CASIADataset (size + RGB bytes)."""
+    with Image.open(path) as image:
+        rgb = image.convert("RGB")
+    return hashlib.sha256(str(rgb.size).encode() + rgb.tobytes()).hexdigest()
+
+
+def drop_duplicate_content(rows: list[dict]) -> tuple[list[dict], list[str]]:
+    """Keep the first row of every set of pixel-identical images; report the others."""
+    kept, problems, first = [], [], {}
+    for row in rows:
+        digest = content_hash(Path(row["image_path"]))
+        if digest in first:
+            problems.append(f"Duplicate content of {Path(first[digest]['image_path']).name} "
+                            f"({first[digest]['source_group']}): {Path(row['image_path']).name}")
+            continue
+        first[digest] = row
+        kept.append(row)
+    return kept, problems
+
+
 def check_pair(row: dict) -> str | None:
     if not row["mask_path"]:
         return None
@@ -312,6 +338,8 @@ def main(argv=None):
     problems += [p for p in map(check_pair, rows) if p]
     bad = {Path(p.split(": ")[-1]).name for p in problems}
     rows = [r for r in rows if Path(r["image_path"]).name not in bad]
+    rows, duplicates = drop_duplicate_content(rows)
+    problems += duplicates
     for row in rows:
         row["image_path"] = str(Path(row["image_path"]).resolve())
         row["mask_path"] = str(Path(row["mask_path"]).resolve()) if row["mask_path"] else ""

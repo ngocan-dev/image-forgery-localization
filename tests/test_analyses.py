@@ -196,3 +196,23 @@ def test_random_degradation_is_deterministic_and_keeps_size():
     assert 0.4 < share < 0.6
     with pytest.raises(ValueError):
         RandomDegradation(seed=0, probability=1.5)
+
+
+def test_duplicate_content_is_kept_once(tmp_path):
+    builder = load_script("build_external_manifest")
+    root = tmp_path / "imd2020"
+    for pid, name in (("1aaaaa", "c1_0.jpg"), ("1bbbbb", "c2_0.jpg")):
+        folder = root / pid
+        folder.mkdir(parents=True)
+        rgb_image().save(folder / f"{pid}_orig.png")                 # identical pixels in both folders
+        Image.fromarray(np.random.default_rng(int(name[1])).integers(0, 255, (30, 40, 3), dtype=np.uint8)
+                        ).save(folder / name.replace(".jpg", ".png"))
+        mask = np.zeros((30, 40), np.uint8); mask[5:10, 5:10] = 255
+        Image.fromarray(mask).save(folder / name.replace(".jpg", "_mask.png"))
+    output = tmp_path / "imd.csv"
+    builder.main(["imd2020", "--dataset-root", str(root), "--output", str(output), "--masks-checked"])
+    with output.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    authentic = [r for r in rows if r["label"] == "Au"]
+    assert len(authentic) == 1 and authentic[0]["source_group"] == "imd2020_1aaaaa"
+    assert sum(r["label"] == "Tp" for r in rows) == 2
